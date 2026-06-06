@@ -14,6 +14,16 @@ from typing import Optional
 from reolink_aio.api import Host
 
 
+# Map a user-facing lens name to the (label, reolink stream name) used when
+# searching for recordings. On dual-lens "single motion" cameras such as the
+# TrackMix PoE, both lenses share channel 0 and the telephoto lens is selected
+# via a "telephoto_" stream prefix (reolink_aio sets iLogicChannel=1 internally).
+LENS_STREAMS: dict[str, tuple[str, str]] = {
+    "wide": ("wide", "main"),
+    "telephoto": ("telephoto", "telephoto_main"),
+}
+
+
 async def download_videos(
     ip: str,
     username: str,
@@ -21,6 +31,7 @@ async def download_videos(
     start_time: datetime,
     end_time: datetime,
     output_dir: Path,
+    lenses: list[str],
 ) -> None:
     """
     Download videos from Reolink camera within the specified date range.
@@ -32,6 +43,7 @@ async def download_videos(
         start_time: Start of date range
         end_time: End of date range
         output_dir: Directory to save downloaded videos
+        lenses: Lens names to download (keys of LENS_STREAMS, e.g. ["wide", "telephoto"])
     """
     # Ensure output directory exists
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -50,49 +62,57 @@ async def download_videos(
             print("Error: No channels found on camera")
             return
 
+        # Dual-lens "single motion" cameras (e.g. TrackMix PoE) report only
+        # channel 0 in host.channels even though they have two lenses, so we
+        # always search on channel 0 and distinguish the lenses by stream name.
         channel = host.channels[0]
         print(f"Using channel: {channel}")
+        print(f"Downloading lens(es): {', '.join(lenses)}")
 
-        # Search for recordings in the date range
-        print(f"Searching for recordings from {start_time} to {end_time}...")
+        # Collect all VOD files, tagged with the lens they came from.
+        all_vod_files: list[tuple[str, object]] = []
+        for lens in lenses:
+            lens_label, stream = LENS_STREAMS[lens]
 
-        # First get the status to see which days have recordings
-        status_list, _ = await host.request_vod_files(
-            channel=channel,
-            start=start_time,
-            end=end_time,
-            status_only=True,
-        )
+            print(f"\nSearching {lens_label} lens for recordings from {start_time} to {end_time}...")
 
-        if not status_list:
-            print("No recordings found in the specified date range")
-            return
+            # First get the status to see which days have recordings
+            status_list, _ = await host.request_vod_files(
+                channel=channel,
+                start=start_time,
+                end=end_time,
+                status_only=True,
+                stream=stream,
+            )
 
-        # Collect all VOD files by requesting files for each day that has recordings
-        all_vod_files = []
-        for status in status_list:
-            year = status.year
-            month = status.month
-            for day in status.days:
-                # Request files for this specific day
-                day_start = datetime(year, month, day, 0, 0, 0)
-                day_end = datetime(year, month, day, 23, 59, 59)
+            if not status_list:
+                print(f"  No {lens_label} recordings found in the specified date range")
+                continue
 
-                # Only process if this day falls within our requested range
-                if day_start > end_time or day_end < start_time:
-                    continue
+            # Request files for each day that has recordings
+            for status in status_list:
+                year = status.year
+                month = status.month
+                for day in status.days:
+                    day_start = datetime(year, month, day, 0, 0, 0)
+                    day_end = datetime(year, month, day, 23, 59, 59)
 
-                print(f"Checking {year}-{month:02d}-{day:02d}...")
-                _, day_files = await host.request_vod_files(
-                    channel=channel,
-                    start=max(day_start, start_time),
-                    end=min(day_end, end_time),
-                    status_only=False,
-                )
+                    # Only process if this day falls within our requested range
+                    if day_start > end_time or day_end < start_time:
+                        continue
 
-                if day_files:
-                    all_vod_files.extend(day_files)
-                    print(f"  Found {len(day_files)} file(s)")
+                    print(f"  Checking {year}-{month:02d}-{day:02d}...")
+                    _, day_files = await host.request_vod_files(
+                        channel=channel,
+                        start=max(day_start, start_time),
+                        end=min(day_end, end_time),
+                        status_only=False,
+                        stream=stream,
+                    )
+
+                    if day_files:
+                        all_vod_files.extend((lens_label, f) for f in day_files)
+                        print(f"    Found {len(day_files)} file(s)")
 
         if not all_vod_files:
             print("No recordings found in the specified date range")
@@ -101,7 +121,7 @@ async def download_videos(
         print(f"\nTotal found: {len(all_vod_files)} recording(s)")
 
         # Download each file
-        for idx, vod_file in enumerate(all_vod_files, 1):
+        for idx, (lens_label, vod_file) in enumerate(all_vod_files, 1):
             # Extract file information
             file_name = vod_file.file_name
             start_time_obj = vod_file.start_time
@@ -114,7 +134,8 @@ async def download_videos(
                 clean_file_name = clean_file_name[:-4]
 
             timestamp_str = start_time_obj.strftime("%Y%m%d_%H%M%S") if start_time_obj else f"recording_{idx}"
-            output_filename = f"{timestamp_str}_{clean_file_name}.mp4"
+            # Tag with the lens so wide/telephoto files don't collide on disk.
+            output_filename = f"{timestamp_str}_{lens_label}_{clean_file_name}.mp4"
             output_path = output_dir / output_filename
 
             print(f"Downloading [{idx}/{len(all_vod_files)}]: {output_filename}...")
@@ -211,8 +232,20 @@ def main():
         default="./downloads",
         help="Output directory for downloaded videos (default: ./downloads)",
     )
+    parser.add_argument(
+        "--lens",
+        choices=["wide", "telephoto", "both"],
+        default="both",
+        help=(
+            "Which lens to download on dual-lens cameras like the TrackMix PoE "
+            "(default: both). Single-lens cameras only have 'wide'."
+        ),
+    )
 
     args = parser.parse_args()
+
+    # Expand the lens choice into the concrete list of lenses to download.
+    lenses = ["wide", "telephoto"] if args.lens == "both" else [args.lens]
 
     # Parse date/time arguments
     try:
@@ -239,6 +272,7 @@ def main():
                 start_time=start_time,
                 end_time=end_time,
                 output_dir=output_dir,
+                lenses=lenses,
             )
         )
     except KeyboardInterrupt:
