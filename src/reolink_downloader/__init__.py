@@ -13,6 +13,8 @@ from typing import Optional
 
 from reolink_aio.api import Host
 
+from .baichuan import BaichuanDownloader, BaichuanError
+
 
 # Map a user-facing lens name to the (label, reolink stream name) used when
 # searching for recordings. On dual-lens "single motion" cameras such as the
@@ -32,6 +34,8 @@ async def download_videos(
     end_time: datetime,
     output_dir: Path,
     lenses: list[str],
+    debug: bool = False,
+    limit: int | None = None,
 ) -> None:
     """
     Download videos from Reolink camera within the specified date range.
@@ -120,47 +124,57 @@ async def download_videos(
 
         print(f"\nTotal found: {len(all_vod_files)} recording(s)")
 
-        # Download each file
-        for idx, (lens_label, vod_file) in enumerate(all_vod_files, 1):
-            # Extract file information
-            file_name = vod_file.file_name
-            start_time_obj = vod_file.start_time
+        if limit is not None:
+            all_vod_files = all_vod_files[:limit]
+            print(f"Limiting to first {len(all_vod_files)} recording(s)")
 
-            # Create a meaningful filename with timestamp
-            # Remove any path separators from file_name and use just the filename part
-            clean_file_name = Path(file_name).name if file_name else f"recording_{idx}"
-            # Remove .mp4 extension if it exists to avoid double extension
-            if clean_file_name.endswith('.mp4'):
-                clean_file_name = clean_file_name[:-4]
+        # Download each file over the fast Baichuan (port 9000) binary protocol
+        # rather than the slow HTTPS cmd=Download API. A single connection is
+        # reused for every clip. See PROTOCOL.md for the protocol details.
+        print(f"\nConnecting to fast download protocol on {ip}:9000...")
+        downloaded = 0
+        async with BaichuanDownloader(ip, username, password, debug=debug) as bc:
+            for idx, (lens_label, vod_file) in enumerate(all_vod_files, 1):
+                file_name = vod_file.file_name
+                start_time_obj = vod_file.start_time
+                end_time_obj = vod_file.end_time
 
-            timestamp_str = start_time_obj.strftime("%Y%m%d_%H%M%S") if start_time_obj else f"recording_{idx}"
-            # Tag with the lens so wide/telephoto files don't collide on disk.
-            output_filename = f"{timestamp_str}_{lens_label}_{clean_file_name}.mp4"
-            output_path = output_dir / output_filename
+                # Build a meaningful, collision-free base name (the downloader
+                # appends the real extension: .mp4 if ffmpeg is present, else
+                # the raw .h265/.h264 elementary stream).
+                clean_file_name = Path(file_name).name if file_name else f"recording_{idx}"
+                if clean_file_name.endswith(".mp4"):
+                    clean_file_name = clean_file_name[:-4]
+                timestamp_str = (
+                    start_time_obj.strftime("%Y%m%d_%H%M%S")
+                    if start_time_obj
+                    else f"recording_{idx}"
+                )
+                output_base = output_dir / f"{timestamp_str}_{lens_label}_{clean_file_name}"
 
-            print(f"Downloading [{idx}/{len(all_vod_files)}]: {output_filename}...")
+                # On dual-lens cameras the lens is selected by channelId
+                # (0 = wide, 1 = telephoto); logicChnBitmap stays 255 as the
+                # native app sends. Single-lens cameras only use channel 0.
+                download_channel = 1 if lens_label == "telephoto" else channel
 
-            # Download the file
-            vod_download = await host.download_vod(
-                filename=file_name,
-                channel=channel,
-            )
+                print(
+                    f"Downloading [{idx}/{len(all_vod_files)}]: {output_base.name} "
+                    f"({start_time_obj} - {end_time_obj})..."
+                )
+                try:
+                    written = await bc.download(
+                        output_base,
+                        start=start_time_obj,
+                        end=end_time_obj,
+                        channel=download_channel,
+                        stream_type="mainStream",
+                    )
+                    print(f"  Saved to: {written}")
+                    downloaded += 1
+                except (BaichuanError, OSError) as e:
+                    print(f"  Failed: {e}", file=sys.stderr)
 
-            # Save to disk by reading from the stream
-            try:
-                with open(output_path, "wb") as f:
-                    while True:
-                        chunk = await vod_download.stream.read(8192)  # Read in 8KB chunks
-                        if not chunk:
-                            break
-                        f.write(chunk)
-
-                print(f"  Saved to: {output_path}")
-            finally:
-                # Clean up the connection
-                await vod_download.close()
-
-        print(f"\nSuccessfully downloaded {len(all_vod_files)} video(s) to {output_dir}")
+        print(f"\nDownloaded {downloaded}/{len(all_vod_files)} video(s) to {output_dir}")
 
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
@@ -241,6 +255,17 @@ def main():
             "(default: both). Single-lens cameras only have 'wide'."
         ),
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Only download the first N recordings found (useful for testing)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print the raw Baichuan protocol exchange (for diagnosing downloads)",
+    )
 
     args = parser.parse_args()
 
@@ -273,6 +298,8 @@ def main():
                 end_time=end_time,
                 output_dir=output_dir,
                 lenses=lenses,
+                debug=args.debug,
+                limit=args.limit,
             )
         )
     except KeyboardInterrupt:

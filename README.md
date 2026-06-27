@@ -11,6 +11,18 @@ has the same issue, and this version ended up needing code to search day by day 
 
 Like the original, this was heavily written by an LLM, though I have reviewed every line of code.
 
+## Fast downloads
+
+Downloads use Reolink's proprietary **Baichuan binary protocol on TCP port 9000** — the
+same one the native apps use — instead of the documented HTTPS `cmd=Download` API. On the
+cameras tested the HTTPS path is bottlenecked by the camera's TLS to ~800 KB/s (the web UI
+export is worse, ~88 KB/s), while the binary protocol reaches several MB/s. The protocol was
+reverse-engineered for this tool; see [`PROTOCOL.md`](PROTOCOL.md) for the full write-up.
+
+Recordings arrive as a raw H.264/H.265 elementary stream. If [`ffmpeg`](https://ffmpeg.org/)
+is on your `PATH`, files are remuxed to `.mp4`; otherwise the raw `.h264`/`.h265` stream is
+written (playable directly in VLC/ffmpeg).
+
 ## Installation
 
 ```
