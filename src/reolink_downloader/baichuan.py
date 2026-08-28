@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import re
 import struct
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -41,6 +42,19 @@ XML_KEY = (0x1F, 0x2D, 0x3C, 0x4B, 0x5A, 0x69, 0x78, 0xFF)
 # download sessions can apparently exceed what some NVRs handle cleanly).
 CONNECT_TIMEOUT_SECONDS = 15.0
 READ_TIMEOUT_SECONDS = 30.0
+
+# The camera can flood a download connection with unrelated traffic (e.g.
+# AlarmEventList/cmd-33 push notifications) that keeps messages arriving
+# continuously without ever advancing the actual requested download —
+# READ_TIMEOUT_SECONDS alone won't catch this, since it only fires on true
+# silence. This bounds how long we'll tolerate zero *media* progress despite
+# ongoing traffic before giving up and letting the caller's retry logic try
+# a fresh connection instead.
+NO_PROGRESS_TIMEOUT_SECONDS = 60.0
+# How often to print a plain notice (regardless of --debug) while stuck
+# discarding unrelated messages, so this failure mode has some visibility
+# even without --debug.
+WAITING_NOTICE_INTERVAL_SECONDS = 15.0
 
 # A request/response correlation id we put in the download request; the camera
 # echoes it on every media message. The value is arbitrary.
@@ -364,7 +378,16 @@ class BaichuanDownloader:
 
         media = bytearray()
         nmsg = 0
+        discarded = 0
+        last_progress_at = time.monotonic()
+        last_waiting_notice_at = 0.0
         while True:
+            if time.monotonic() - last_progress_at > NO_PROGRESS_TIMEOUT_SECONDS:
+                raise BaichuanError(
+                    f"no download progress for {NO_PROGRESS_TIMEOUT_SECONDS:.0f}s despite "
+                    f"ongoing traffic ({discarded} unrelated message(s) received, {nmsg} media "
+                    f"message(s) so far) — likely stuck behind unrelated camera event/alarm traffic"
+                )
             try:
                 cmd_id, mess_id, status, mclass, poff, body = await self._read_message()
             except (asyncio.IncompleteReadError, ConnectionError) as e:
@@ -375,6 +398,11 @@ class BaichuanDownloader:
                 if self.debug and (status not in (0, 200) or body):
                     self._dbg(f"recv cmd={cmd_id} status={status} class={mclass} "
                               f"len={len(body)} :: {self._decrypt_control(body, mess_id, poff)[:200]}")
+                discarded += 1
+                now = time.monotonic()
+                if not self.debug and now - last_waiting_notice_at > WAITING_NOTICE_INTERVAL_SECONDS:
+                    last_waiting_notice_at = now
+                    print(f"  Still waiting for media data ({discarded} unrelated message(s) from camera so far)...")
                 continue
             if not body:
                 self._dbg(f"end-of-stream marker (cmd143 len=0) after {nmsg} media msgs")
@@ -391,6 +419,7 @@ class BaichuanDownloader:
                           f"decoded_head={chunk[:8].hex()}")
             media += chunk
             nmsg += 1
+            last_progress_at = time.monotonic()
             if on_progress is not None:
                 try:
                     on_progress(len(media), total_size)

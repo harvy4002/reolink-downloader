@@ -115,6 +115,16 @@ reconnect attempts, any other workers (`--concurrency` > 1) simply pick up the r
 only with `--concurrency 1` (no other worker to fall back on) would a total connection
 failure leave the queue unprocessed.
 
+A camera can also flood a download connection with unrelated real traffic — e.g.
+`AlarmEventList` event/alarm push notifications — that keeps messages arriving
+continuously without ever advancing the requested download. That's a different failure
+mode from the connection going silent (which the read timeout above already catches):
+data genuinely is arriving, just never the media that was asked for. If 60 seconds pass
+with messages arriving but zero download progress, the attempt is abandoned and retried
+the same way a stalled connection is. Even without `--debug`, you'll see a periodic
+`Still waiting for media data (N unrelated message(s) from camera so far)...` notice
+while this is happening, so it isn't silent.
+
 ## Resuming interrupted runs
 
 Re-running the same `--start-time`/`--end-time`/`--channel` range is safe and cheap: for
