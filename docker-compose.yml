@@ -1,9 +1,15 @@
 # reolink-downloader — one-off Compose job for a Synology NAS / Container Manager.
 #
 # Quick start on Synology:
-#   1. In File Station, create a shared folder (e.g. docker/reolink-downloader) and
-#      upload just this one file into it — the `build:` line below points straight at
-#      the public GitHub repo, so Container Manager doesn't need the rest of the source.
+#   1. Get the project files onto the NAS — Synology's Container Manager builds
+#      images using its own local Docker engine, which does NOT have `git` available,
+#      so a remote git build context (`build: https://github.com/...`) fails there
+#      with "unable to find 'git'" even though it works fine on a normal Docker
+#      install. Instead, download a zip snapshot of the repo (no git required):
+#        https://github.com/harvy4002/reolink-downloader/archive/refs/heads/main.zip
+#      and extract it into a shared folder (e.g. docker/reolink-downloader) via File
+#      Station — you need the whole folder (this file, Dockerfile, pyproject.toml,
+#      uv.lock, README.md, src/), not just this compose file.
 #   2. Open Container Manager → Project → Create, set "Path" to that folder, and let it
 #      pick up this docker-compose.yml.
 #   3. Edit the `environment:` values below for your camera (or, for secrets you'd
@@ -15,17 +21,11 @@
 #      exits — it does not run on a schedule.
 #   5. To fetch a new batch, edit REOLINK_START_TIME/REOLINK_END_TIME and re-run
 #      (`docker compose up --build` again, or Container Manager's Action → Build/Start).
-#
-# The git-context build re-clones and rebuilds from the repo's current `main` branch
-# every time. For a reproducible/pinned build instead, replace `#main` below with a
-# specific tag or commit, e.g. `#v1.2.3`. If you already have the full repo checked out
-# locally (e.g. for development), swap the `build:` line for the commented `build: .`
-# alternative to build from the local source tree instead.
+#      If you've changed the code, re-download/extract the zip first.
 
 services:
   reolink-downloader:
-    build: https://github.com/harvy4002/reolink-downloader.git#main
-    # build: .
+    build: .
     image: reolink-downloader:latest
     volumes:
       - ./downloads:/downloads

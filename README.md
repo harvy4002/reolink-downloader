@@ -136,20 +136,15 @@ required options — set each one via its flag or its environment variable.
 
 ## Docker
 
-[`docker-compose.yml`](docker-compose.yml) is a ready-to-use, **self-contained** Compose
-file: every setting is listed inline under `environment:` with the tool's real defaults
-and an example value in a comment, so you don't need to hunt through a separate file to
-see what's configurable. This is a one-off job, not a long-running service — the
-container starts, downloads everything in the configured date range, and exits.
-
-Its `build:` line points directly at this repo on GitHub
-(`https://github.com/harvy4002/reolink-downloader.git#main`), using Docker's built-in
-support for building from a remote Git URL. That means **you only need to copy
-`docker-compose.yml` itself** to wherever you're running it — Docker clones and builds
-the rest during `docker compose up --build`. If you'd rather build from a local checkout
-(e.g. for development), swap in the commented `build: .` line instead.
+[`docker-compose.yml`](docker-compose.yml) is a ready-to-use Compose file: every setting
+is listed inline under `environment:` with the tool's real defaults and an example value
+in a comment, so you don't need to hunt through a separate file to see what's
+configurable. This is a one-off job, not a long-running service — the container starts,
+downloads everything in the configured date range, and exits.
 
 ```
+git clone https://github.com/harvy4002/reolink-downloader.git
+cd reolink-downloader
 docker compose up --build     # first run: builds the image, then downloads
 docker compose up --build     # later runs: edit REOLINK_START_TIME/END_TIME first
 ```
@@ -162,14 +157,26 @@ this repo's `.gitignore`.
 
 ### Synology Container Manager
 
-1. In File Station, create a shared folder (e.g. `docker/reolink-downloader`) and upload
-   just `docker-compose.yml` into it (plus an optional `.env` for secrets, per above).
+Synology's Container Manager builds images with its own local Docker engine, which
+doesn't have `git` installed — pointing `build:` at a remote GitHub URL fails there with
+`unable to find 'git'`, even though the same compose file builds fine on a normal Docker
+install. So the project's actual files need to already be present on the NAS:
+
+1. Download a zip snapshot of the repo (no `git` required) —
+   `https://github.com/harvy4002/reolink-downloader/archive/refs/heads/main.zip` — and
+   extract it via File Station into a shared folder (e.g. `docker/reolink-downloader`).
+   You need the whole extracted folder (`docker-compose.yml`, `Dockerfile`,
+   `pyproject.toml`, `uv.lock`, `README.md`, `src/`), not just the compose file.
 2. Open **Container Manager → Project → Create**, set "Path" to that folder — Container
    Manager picks up `docker-compose.yml` automatically.
-3. Build and start the project. Since this is a one-off job, leave the project's
+3. Edit the `environment:` values in `docker-compose.yml` for your camera, or add a
+   sibling `.env` file in the same folder for anything you'd rather not leave in a
+   tracked file (Compose substitutes `${VAR}` from it automatically).
+4. Build and start the project. Since this is a one-off job, leave the project's
    auto-restart setting off (the compose file also sets `restart: "no"`).
-4. To fetch a new batch, edit `REOLINK_START_TIME`/`REOLINK_END_TIME` (in the compose
-   file or `.env`) and re-run the project's Build/Start actions.
+5. To fetch a new batch, edit `REOLINK_START_TIME`/`REOLINK_END_TIME` (in the compose
+   file or `.env`) and re-run the project's Build/Start actions. If the tool's code has
+   changed, re-download and re-extract the zip first.
 
 Downloaded videos land in the `./downloads` folder next to the compose file
 (bind-mounted into the container), so they survive after the container exits.
