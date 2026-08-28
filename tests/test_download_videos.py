@@ -111,10 +111,46 @@ async def test_invalid_channel_returns_without_raising(tmp_path, monkeypatch, ca
     assert list(tmp_path.iterdir()) == []
 
 
+async def test_downloads_are_ordered_oldest_first_across_channels(tmp_path, monkeypatch):
+    # ch0's second file is older than ch1's first file, so a naive
+    # per-channel grouping (all of ch0 before any of ch1) would download it
+    # out of chronological order. NVR retention deletes the oldest footage
+    # first once storage fills up, independently per channel, so the oldest
+    # recordings anywhere are the most at risk — they must come first
+    # regardless of which channel they're on.
+    recordings = {
+        (0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("ch0_old", 1), ("ch0_new", 4)]),
+        (1, "main"): _recordings(channel=1, stream="main", names_and_hours=[("ch1_mid", 2), ("ch1_newer", 3)]),
+    }
+    fake_host_cls = make_fake_host_class(channels=[0, 1], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls()
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        concurrency=1,
+    )
+
+    assert fake_bc_cls.calls == [
+        (0, "20240115_010000_wide_ch0_old"),
+        (1, "20240115_020000_wide_ch1_mid"),
+        (1, "20240115_030000_wide_ch1_newer"),
+        (0, "20240115_040000_wide_ch0_new"),
+    ]
+
+
 async def test_limit_is_a_global_cap_across_channels(tmp_path, monkeypatch):
     recordings = {
-        (0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("ch0_a", 1), ("ch0_b", 2)]),
-        (1, "main"): _recordings(channel=1, stream="main", names_and_hours=[("ch1_a", 1), ("ch1_b", 2)]),
+        (0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("ch0_a", 1), ("ch0_b", 3)]),
+        (1, "main"): _recordings(channel=1, stream="main", names_and_hours=[("ch1_a", 2), ("ch1_b", 4)]),
     }
     fake_host_cls = make_fake_host_class(channels=[0, 1], recordings=recordings)
     fake_bc_cls = make_fake_baichuan_cls()
@@ -134,9 +170,9 @@ async def test_limit_is_a_global_cap_across_channels(tmp_path, monkeypatch):
         limit=2,
     )
 
-    # Deterministic: sorted by (channel, start_time), so the first 2 chosen
-    # are channel 0's two files, not one from each channel.
-    assert fake_bc_cls.calls == [(0, "20240115_010000_wide_ch0_a"), (0, "20240115_020000_wide_ch0_b")]
+    # Global cap over the oldest-first-across-channels order: the 2 oldest
+    # recordings overall, not 2-per-channel or channel-grouped.
+    assert fake_bc_cls.calls == [(0, "20240115_010000_wide_ch0_a"), (1, "20240115_020000_wide_ch1_a")]
 
 
 async def test_no_recordings_sends_zero_count_finish(tmp_path, monkeypatch):

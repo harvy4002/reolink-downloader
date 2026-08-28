@@ -422,10 +422,15 @@ async def download_videos(
             )
             return
 
-        # Sort deterministically before applying --limit: channel searches ran
-        # concurrently, so result order would otherwise be non-deterministic
-        # across runs, and --limit is a global cap over the combined list.
-        all_vod_files.sort(key=lambda t: (t[0], t[2].start_time or datetime.min))
+        # Sort oldest-first across ALL channels combined (not grouped by
+        # channel) before applying --limit: NVR storage retention deletes the
+        # oldest footage first once it fills up, independently per channel,
+        # so the oldest recordings anywhere are the most at risk of being
+        # deleted before we get to them — download those first rather than
+        # exhausting one channel before touching the next. This also makes
+        # search order (channels searched concurrently) deterministic across
+        # runs, and --limit a global cap over the combined list.
+        all_vod_files.sort(key=lambda t: (t[2].start_time or datetime.min, t[0]))
 
         print(f"\nTotal found: {len(all_vod_files)} recording(s)")
 

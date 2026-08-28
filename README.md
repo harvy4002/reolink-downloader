@@ -39,8 +39,12 @@ downloaded on cameras/channels that have a second lens (e.g. TrackMix PoE); it's
 automatically narrowed to `wide` on channels that don't have one, so there's no wasted
 search on plain single-lens channels.
 
-`--limit` is a **global** cap across all selected channels combined (applied after
-sorting by channel then recording time), not a per-channel limit.
+Downloads are ordered **oldest-first across all selected channels combined**, not
+grouped by channel — NVR storage retention deletes the oldest footage first once it
+fills up, independently per channel, so the oldest recordings anywhere are the most at
+risk of being deleted before this tool gets to them. `--limit` is a **global** cap
+applied after that oldest-first sort, so `--limit N` means "the N oldest recordings
+overall," not N per channel.
 
 ### Download concurrency and NVR load
 
