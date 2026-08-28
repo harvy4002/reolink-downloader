@@ -119,3 +119,27 @@ def test_blank_env_vars_fall_back_to_defaults(monkeypatch):
     assert captured["limit"] is None
     assert captured["concurrency"] == 3
     assert captured["channel_spec"] == "all"
+
+
+def test_max_download_mb_unset_by_default(monkeypatch):
+    captured = _run_main_capturing_download_call(monkeypatch, [], REQUIRED_ENV)
+    assert captured["max_download_mb"] is None
+
+
+def test_max_download_mb_read_from_env(monkeypatch):
+    env = {**REQUIRED_ENV, "REOLINK_MAX_DOWNLOAD_MB": "300"}
+    captured = _run_main_capturing_download_call(monkeypatch, [], env)
+    assert captured["max_download_mb"] == 300
+
+
+def test_max_download_mb_rejects_less_than_one(monkeypatch, capsys):
+    env = {**REQUIRED_ENV, "REOLINK_MAX_DOWNLOAD_MB": "0"}
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(sys, "argv", ["reolink-downloader"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        rd.main()
+
+    assert exc_info.value.code == 1
+    assert "--max-download-mb" in capsys.readouterr().err

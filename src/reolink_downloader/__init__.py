@@ -19,7 +19,7 @@ from pathlib import Path
 from reolink_aio.api import Host
 from reolink_aio.exceptions import ReolinkError
 
-from .baichuan import BaichuanDownloader, BaichuanError
+from .baichuan import BaichuanDownloader, BaichuanError, BaichuanFileTooLargeError
 from .telegram import TelegramNotifier
 
 
@@ -148,7 +148,9 @@ def _make_progress_logger(job: "DownloadJob", worker_id: int):
     return _on_progress
 
 
-async def _attempt_download(bc: BaichuanDownloader, job: "DownloadJob", worker_id: int) -> Path:
+async def _attempt_download(
+    bc: BaichuanDownloader, job: "DownloadJob", worker_id: int, max_download_bytes: int | None
+) -> Path:
     try:
         total_size = job.vod_file.size
     except Exception:
@@ -160,6 +162,7 @@ async def _attempt_download(bc: BaichuanDownloader, job: "DownloadJob", worker_i
         channel=job.download_channel,
         stream_type="mainStream",
         total_size=total_size,
+        max_bytes=max_download_bytes,
         on_progress=_make_progress_logger(job, worker_id),
     )
 
@@ -172,24 +175,32 @@ async def _download_with_retries(
     username: str,
     password: str,
     debug: bool,
+    max_download_bytes: int | None = None,
 ) -> Path:
     """Attempt job's download up to 1 + MAX_RETRIES times. The first attempt
     reuses the worker's long-lived connection; retries open a fresh
     short-lived connection each time, since a stale/broken connection may be
     why the first attempt failed. Raises the last error if every attempt
-    fails."""
+    fails.
+
+    A BaichuanFileTooLargeError (--max-download-mb exceeded) is never
+    retried: the same recording would hit the same size limit again on
+    every attempt, so it's raised immediately instead of wasting the retry
+    budget on a deterministically-doomed repeat."""
     last_error: BaichuanError | OSError | None = None
     for attempt in range(1, MAX_RETRIES + 2):
         try:
             if attempt == 1:
-                return await _attempt_download(bc, job, worker_id)
+                return await _attempt_download(bc, job, worker_id, max_download_bytes)
             print(
                 f"  Retrying [{job.idx}] {job.output_base.name} "
                 f"(attempt {attempt}/{MAX_RETRIES + 1}; previous error: {last_error})"
             )
             await asyncio.sleep(RETRY_DELAY_SECONDS)
             async with BaichuanDownloader(ip, username, password, debug=debug) as retry_bc:
-                return await _attempt_download(retry_bc, job, worker_id)
+                return await _attempt_download(retry_bc, job, worker_id, max_download_bytes)
+        except BaichuanFileTooLargeError:
+            raise
         except (BaichuanError, OSError) as e:
             last_error = e
     assert last_error is not None
@@ -314,6 +325,7 @@ async def _download_worker(
     notifier: TelegramNotifier,
     downloaded_count: list[int],
     progress_state: dict,
+    max_download_bytes: int | None = None,
 ) -> None:
     """Drain the shared download queue using one persistent Baichuan
     connection. Each file gets up to 1 + MAX_RETRIES attempts before being
@@ -335,10 +347,16 @@ async def _download_worker(
                             f"({job.vod_file.start_time} - {job.vod_file.end_time})..."
                         )
                         written = await _download_with_retries(
-                            job, worker_id, bc, ip, username, password, debug
+                            job, worker_id, bc, ip, username, password, debug, max_download_bytes
                         )
                         print(f"  Saved to: {written}")
                         downloaded_count[0] += 1
+                    except BaichuanFileTooLargeError as e:
+                        print(f"  Skipped (too large): {e}", file=sys.stderr)
+                        channel_errors[job.channel] = channel_errors.get(job.channel, 0) + 1
+                        await notifier.notify_error(
+                            channel=job.channel, file_name=job.output_base.name, error=f"skipped, too large: {e}"
+                        )
                     except (BaichuanError, OSError) as e:
                         print(f"  Failed after {MAX_RETRIES + 1} attempts: {e}", file=sys.stderr)
                         channel_errors[job.channel] = channel_errors.get(job.channel, 0) + 1
@@ -405,6 +423,7 @@ async def download_videos(
     concurrency: int = 3,
     debug: bool = False,
     limit: int | None = None,
+    max_download_mb: int | None = None,
     notifier: TelegramNotifier | None = None,
 ) -> None:
     """
@@ -420,6 +439,8 @@ async def download_videos(
         lenses: Lens names to download (keys of LENS_STREAMS, e.g. ["wide", "telephoto"])
         channel_spec: "all" or a set of channel indices to restrict to
         concurrency: Number of concurrent Baichuan download connections
+        max_download_mb: Skip (not retry) a single recording once it exceeds this
+            many MB, to avoid an out-of-memory crash on an unexpectedly huge file
         notifier: Telegram notifier (a no-op instance is created if omitted)
     """
     notifier = notifier or TelegramNotifier()
@@ -597,7 +618,7 @@ async def download_videos(
             )
         )
         try:
-            await asyncio.gather(
+            worker_results = await asyncio.gather(
                 *(
                     _download_worker(
                         worker_id,
@@ -614,11 +635,19 @@ async def download_videos(
                         notifier,
                         downloaded_count,
                         progress_state,
+                        max_download_mb * 1_000_000 if max_download_mb is not None else None,
                     )
                     for worker_id in range(concurrency)
                 ),
                 return_exceptions=True,
             )
+            # return_exceptions=True means a worker crashing on something
+            # unexpected (not the BaichuanError/OSError it's built to
+            # survive) would otherwise vanish with zero indication --
+            # surface it rather than silently doing less work than expected.
+            for worker_id, result in enumerate(worker_results):
+                if isinstance(result, Exception):
+                    print(f"Worker {worker_id}: crashed unexpectedly: {result!r}", file=sys.stderr)
         finally:
             heartbeat_task.cancel()
             try:
@@ -770,7 +799,7 @@ def main():
             "Docker/unattended use) — a CLI flag always overrides its environment variable: "
             "REOLINK_IP, REOLINK_USERNAME, REOLINK_PASSWORD, REOLINK_START_TIME, "
             "REOLINK_END_TIME, REOLINK_OUTPUT, REOLINK_CHANNEL, REOLINK_CONCURRENCY, "
-            "REOLINK_LENS, REOLINK_LIMIT, REOLINK_DEBUG.\n\n"
+            "REOLINK_LENS, REOLINK_LIMIT, REOLINK_MAX_DOWNLOAD_MB, REOLINK_DEBUG.\n\n"
             "Telegram notifications (optional): set the TELEGRAM_BOT_TOKEN and "
             "TELEGRAM_CHAT_ID environment variables to receive run start/finish, "
             "per-channel progress, and per-file error notifications. Both must be "
@@ -851,6 +880,18 @@ def main():
         ),
     )
     parser.add_argument(
+        "--max-download-mb",
+        type=int,
+        default=_env("REOLINK_MAX_DOWNLOAD_MB"),
+        help=(
+            "Skip (not retry) a single recording once it exceeds this many MB, instead of "
+            "downloading it in full. A recording far larger than a typical short clip can use "
+            "well over 2x its size in memory while processing, which risks an out-of-memory "
+            "crash on a memory-constrained device; skipping it keeps the rest of the run going. "
+            "Unset by default (no cap). (env: REOLINK_MAX_DOWNLOAD_MB)"
+        ),
+    )
+    parser.add_argument(
         "--debug",
         action="store_true",
         default=_env_bool("REOLINK_DEBUG"),
@@ -917,6 +958,10 @@ def main():
             file=sys.stderr,
         )
 
+    if args.max_download_mb is not None and args.max_download_mb < 1:
+        print("Error: --max-download-mb must be at least 1", file=sys.stderr)
+        sys.exit(1)
+
     output_dir = Path(args.output)
 
     # Run the async download function
@@ -935,6 +980,7 @@ def main():
                     concurrency=args.concurrency,
                     debug=args.debug,
                     limit=args.limit,
+                    max_download_mb=args.max_download_mb,
                 )
             )
         )

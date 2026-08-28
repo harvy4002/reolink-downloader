@@ -490,3 +490,36 @@ async def test_no_diag_output_without_debug(tmp_path, monkeypatch, capsys):
     )
 
     assert "[diag]" not in capsys.readouterr().out
+
+
+async def test_oversized_recording_is_skipped_without_retries(tmp_path, monkeypatch):
+    # ch0_a is a normal file; ch0_huge is "too large" per max_download_mb.
+    # The oversized one must fail immediately (no retries -- retrying would
+    # just hit the same size limit again) while the other still succeeds.
+    recordings = {(0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("ch0_a", 1), ("ch0_huge", 2)])}
+    fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls(too_large_names={"20240115_020000_wide_ch0_huge"})
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        concurrency=1,
+        max_download_mb=100,
+        notifier=notifier,
+    )
+
+    # Exactly one attempt for the oversized file -- no retries wasted on it.
+    assert fake_bc_cls.attempt_counts["20240115_020000_wide_ch0_huge"] == 1
+    files = list((tmp_path / "2024-01-15" / "ch00_Cam0").glob("*.mp4"))
+    assert len(files) == 1
+    assert "ch0_a" in files[0].name
+    assert any("skipped, too large" in m for m in notifier.messages)

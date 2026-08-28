@@ -11,7 +11,7 @@ import asyncio
 import pytest
 
 import reolink_downloader as rd
-from reolink_downloader.baichuan import BaichuanError
+from reolink_downloader.baichuan import BaichuanError, BaichuanFileTooLargeError
 from reolink_downloader.telegram import TelegramNotifier
 
 
@@ -81,7 +81,12 @@ def make_fake_host_class(*, channels, is_nvr=True, dual_lens_channels=(), names=
 
 
 def make_fake_baichuan_cls(
-    *, fail_predicate=lambda name: False, fail_times=None, connect_fail_times=0, download_delay=0.0
+    *,
+    fail_predicate=lambda name: False,
+    fail_times=None,
+    connect_fail_times=0,
+    download_delay=0.0,
+    too_large_names=frozenset(),
 ):
     """Build a fake BaichuanDownloader replacement. Records (channel, name)
     for every download() call in the returned class's `.calls` list, and
@@ -99,6 +104,10 @@ def make_fake_baichuan_cls(
     download_delay: seconds to asyncio.sleep() inside each download() call —
         gives background tasks (e.g. the progress heartbeat) real wall-clock
         time to fire during an otherwise-instant fake download.
+    too_large_names: out_path.name values that raise
+        BaichuanFileTooLargeError whenever max_bytes is passed — simulates a
+        recording that exceeds --max-download-mb, regardless of how large
+        the (fake, instant) download actually "is".
     """
     calls: list[tuple[int, str]] = []
     attempt_counts: dict[str, int] = {}
@@ -118,11 +127,16 @@ def make_fake_baichuan_cls(
         async def __aexit__(self, *exc):
             return None
 
-        async def download(self, out_path, *, start, end, channel, stream_type, total_size=None, on_progress=None):
+        async def download(
+            self, out_path, *, start, end, channel, stream_type,
+            total_size=None, max_bytes=None, on_progress=None,
+        ):
             if download_delay:
                 await asyncio.sleep(download_delay)
             calls.append((channel, out_path.name))
             attempt_counts[out_path.name] = attempt_counts.get(out_path.name, 0) + 1
+            if max_bytes is not None and out_path.name in too_large_names:
+                raise BaichuanFileTooLargeError(f"simulated: {out_path.name} exceeds {max_bytes} bytes")
             if on_progress is not None and total_size:
                 on_progress(total_size // 2, total_size)
                 on_progress(total_size, total_size)

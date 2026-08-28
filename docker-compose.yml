@@ -69,6 +69,10 @@ services:
       # Cap on total recordings downloaded across all selected channels. Leave the
       # substitution default empty to download everything found.
       REOLINK_LIMIT: "${REOLINK_LIMIT:-}"
+      # Skip (not retry) a single recording once it exceeds this many MB, rather than
+      # risking an out-of-memory crash downloading it in full. Leave empty for no cap;
+      # set this if you've actually seen the container die with no error logged.
+      REOLINK_MAX_DOWNLOAD_MB: "${REOLINK_MAX_DOWNLOAD_MB:-}"
       # Print the raw Baichuan protocol exchange, for diagnosing a failed download.
       REOLINK_DEBUG: "${REOLINK_DEBUG:-false}"
 

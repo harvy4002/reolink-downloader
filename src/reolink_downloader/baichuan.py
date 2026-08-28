@@ -112,6 +112,14 @@ class BaichuanError(Exception):
     """A Baichuan protocol or connection error."""
 
 
+class BaichuanFileTooLargeError(BaichuanError):
+    """Raised when a recording exceeds an optional max_bytes cap passed to
+    download(). Deliberately not worth retrying: the same recording will
+    hit the same size again on every attempt, so callers should treat this
+    as an immediate, permanent skip rather than spending the normal retry
+    budget on it."""
+
+
 def _u32(b: bytes) -> int:
     return struct.unpack("<I", b)[0]
 
@@ -355,6 +363,7 @@ class BaichuanDownloader:
         stream_type: str = "mainStream",
         logic_bitmap: int = 255,
         total_size: int | None = None,
+        max_bytes: int | None = None,
         on_progress: Callable[[int, int | None], None] | None = None,
     ) -> Path:
         """Download the recording covering ``start``–``end`` to ``out_path``.
@@ -368,6 +377,12 @@ class BaichuanDownloader:
         whatever the caller passed in — usually the on-camera file size — and
         may be ``None`` if unknown). Exceptions raised by the callback are
         swallowed so a logging bug can never abort an in-progress download.
+
+        ``max_bytes``, if given, aborts the download with
+        BaichuanFileTooLargeError as soon as accumulated raw media exceeds
+        it — a hard cap (unlike LARGE_DOWNLOAD_WARNING_BYTES, which only
+        warns) for callers that would rather cleanly skip an unexpectedly
+        huge recording than risk an OOM kill downloading it in full.
         """
         if self._key is None:
             raise BaichuanError("not logged in")
@@ -427,6 +442,12 @@ class BaichuanDownloader:
             media += chunk
             nmsg += 1
             last_progress_at = time.monotonic()
+            if max_bytes is not None and len(media) > max_bytes:
+                raise BaichuanFileTooLargeError(
+                    f"recording exceeded the {max_bytes / 1_000_000:.0f} MB max-download-size "
+                    f"limit ({len(media) / 1_000_000:.0f} MB collected so far, {nmsg} media "
+                    f"messages) — aborting to avoid excessive memory use"
+                )
             if on_progress is not None:
                 try:
                     on_progress(len(media), total_size)

@@ -137,6 +137,16 @@ short clip — worth checking whether that's expected for your recording schedul
 deframing step itself reuses the same buffer rather than making extra full copies of it,
 to keep the peak memory overhead as low as it reasonably can be.
 
+If you've actually hit an out-of-memory crash (the container just dies, no application
+error logged — that's what an OOM kill looks like), set `--max-download-mb`
+(`REOLINK_MAX_DOWNLOAD_MB`) to a ceiling appropriate for your device's available memory.
+A recording that exceeds it is skipped immediately — logged and reported to Telegram as
+a permanent failure, with no retries wasted on it, since the same recording would hit the
+same limit again every time — rather than risking another crash downloading it in full.
+Unset by default (no cap), since it's a hard skip, not just a warning: only turn it on if
+you've actually seen memory pressure, so you don't unexpectedly lose recordings that
+would have downloaded fine.
+
 ## Resuming interrupted runs
 
 Re-running the same `--start-time`/`--end-time`/`--channel` range is safe and cheap: for
@@ -206,6 +216,7 @@ its environment variable if both are set.
 | `--concurrency`    | `REOLINK_CONCURRENCY`    |
 | `--lens`           | `REOLINK_LENS`           |
 | `--limit`          | `REOLINK_LIMIT`          |
+| `--max-download-mb` | `REOLINK_MAX_DOWNLOAD_MB` |
 | `--debug`          | `REOLINK_DEBUG` (`true`/`1`/`yes`/`on`) |
 
 `--ip`, `--username`, `--password`, `--start-time`, and `--end-time` are the only
@@ -311,7 +322,7 @@ usage: reolink-downloader [-h] [--ip IP] [--username USERNAME]
                           [--end-time END_TIME] [--output OUTPUT]
                           [--channel CHANNEL] [--concurrency CONCURRENCY]
                           [--lens {wide,telephoto,both}] [--limit LIMIT]
-                          [--debug]
+                          [--max-download-mb MAX_DOWNLOAD_MB] [--debug]
 
 Download videos from a Reolink NVR/camera within a specified date range
 
@@ -347,6 +358,15 @@ options:
   --limit LIMIT         Only download the first N recordings found across all
                         selected channels (useful for testing) (env:
                         REOLINK_LIMIT)
+  --max-download-mb MAX_DOWNLOAD_MB
+                        Skip (not retry) a single recording once it exceeds
+                        this many MB, instead of downloading it in full. A
+                        recording far larger than a typical short clip can use
+                        well over 2x its size in memory while processing,
+                        which risks an out-of-memory crash on a memory-
+                        constrained device; skipping it keeps the rest of the
+                        run going. Unset by default (no cap). (env:
+                        REOLINK_MAX_DOWNLOAD_MB)
   --debug               Print the raw Baichuan protocol exchange (for
                         diagnosing downloads) (env: REOLINK_DEBUG)
 
@@ -354,9 +374,9 @@ Every option above can also be set via an environment variable (useful for
 Docker/unattended use) — a CLI flag always overrides its environment
 variable: REOLINK_IP, REOLINK_USERNAME, REOLINK_PASSWORD, REOLINK_START_TIME,
 REOLINK_END_TIME, REOLINK_OUTPUT, REOLINK_CHANNEL, REOLINK_CONCURRENCY,
-REOLINK_LENS, REOLINK_LIMIT, REOLINK_DEBUG. Telegram notifications
-(optional): set the TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment
-variables to receive run start/finish, per-channel progress, and per-file
-error notifications. Both must be set for notifications to be sent;
+REOLINK_LENS, REOLINK_LIMIT, REOLINK_MAX_DOWNLOAD_MB, REOLINK_DEBUG. Telegram
+notifications (optional): set the TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID
+environment variables to receive run start/finish, per-channel progress, and
+per-file error notifications. Both must be set for notifications to be sent;
 otherwise they're silently skipped.
 ```
