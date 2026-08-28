@@ -40,6 +40,11 @@ MAX_RECOMMENDED_CONCURRENCY = 4  # Reolink PoE NVRs cap concurrent playback stre
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 2.0
 
+# How often to push a Telegram progress update purely on a timer, independent
+# of file-completion events — useful for confirming a long run is still
+# alive (not silently stalled) without watching logs.
+PROGRESS_HEARTBEAT_INTERVAL_SECONDS = 3600
+
 
 @dataclass
 class DownloadJob:
@@ -75,6 +80,41 @@ def resolve_lenses_for_channel(host: Host, channel: int, lenses: list[str]) -> l
 def _slug(name: str) -> str:
     slug = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-")
     return slug or "unnamed"
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = int(seconds)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{secs:02d}s"
+    return f"{secs}s"
+
+
+async def _periodic_progress_heartbeat(
+    interval_seconds: float,
+    total: int,
+    downloaded_count: list[int],
+    channel_errors: dict[int, int],
+    notifier: TelegramNotifier,
+    started_at: float,
+) -> None:
+    """Send a Telegram progress update every interval_seconds on a timer,
+    regardless of how many files have completed since the last one — a
+    heartbeat proving the run is still alive, not a milestone notification."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        failed_total = sum(channel_errors.values())
+        done_total = downloaded_count[0] + failed_total
+        await notifier.notify_heartbeat(
+            done=done_total,
+            total=total,
+            succeeded=downloaded_count[0],
+            failed=failed_total,
+            elapsed=_format_duration(time.monotonic() - started_at),
+        )
 
 
 def _make_progress_logger(job: "DownloadJob", worker_id: int):
@@ -443,10 +483,16 @@ async def download_videos(
         # so each day's recordings are grouped by channel underneath it, and
         # to avoid filename collisions across channels (on-device filenames
         # are often generic per-channel).
+        #
+        # Resumable: a recording already sitting on disk from a previous run
+        # (as either a .h264 or .h265 file — whichever the camera happened to
+        # send) is skipped rather than re-downloaded, so re-running after an
+        # interruption only fetches what's actually missing.
         day_channel_dirs: dict[tuple[str, int], Path] = {}
         jobs: list[DownloadJob] = []
         channel_totals: dict[int, int] = {}
-        for idx, (channel, lens_label, vod_file) in enumerate(all_vod_files, 1):
+        already_downloaded = 0
+        for position, (channel, lens_label, vod_file) in enumerate(all_vod_files, 1):
             file_name = vod_file.file_name
             start_time_obj = vod_file.start_time
             date_str = start_time_obj.strftime("%Y-%m-%d") if start_time_obj else "unknown-date"
@@ -458,13 +504,17 @@ async def download_videos(
                 day_channel_dirs[dir_key] = day_channel_dir
             day_channel_dir = day_channel_dirs[dir_key]
 
-            clean_file_name = Path(file_name).name if file_name else f"recording_{idx}"
+            clean_file_name = Path(file_name).name if file_name else f"recording_{position}"
             if clean_file_name.endswith(".mp4"):
                 clean_file_name = clean_file_name[:-4]
             timestamp_str = (
-                start_time_obj.strftime("%Y%m%d_%H%M%S") if start_time_obj else f"recording_{idx}"
+                start_time_obj.strftime("%Y%m%d_%H%M%S") if start_time_obj else f"recording_{position}"
             )
             output_base = day_channel_dir / f"{timestamp_str}_{lens_label}_{clean_file_name}"
+
+            if output_base.with_suffix(".h264").exists() or output_base.with_suffix(".h265").exists():
+                already_downloaded += 1
+                continue
 
             # On dual-lens cameras/channels the lens is selected by channelId
             # (base = wide, base+1 = telephoto); logicChnBitmap stays 255 as
@@ -474,8 +524,19 @@ async def download_videos(
             # attached to an NVR channel other than 0 is unverified.
             download_channel = channel + 1 if lens_label == "telephoto" else channel
 
-            jobs.append(DownloadJob(idx, channel, lens_label, vod_file, output_base, download_channel))
+            jobs.append(DownloadJob(len(jobs) + 1, channel, lens_label, vod_file, output_base, download_channel))
             channel_totals[channel] = channel_totals.get(channel, 0) + 1
+
+        if already_downloaded:
+            print(f"Skipping {already_downloaded} recording(s) already on disk (resuming)")
+
+        if not jobs:
+            print("Nothing left to download — everything found is already on disk")
+            await notifier.notify_finish(
+                ip=ip, total_found=len(all_vod_files), total_downloaded=0, total_failed=0,
+                output_dir=str(output_dir), already_present=already_downloaded,
+            )
+            return
 
         # Download over the fast Baichuan (port 9000) binary protocol rather
         # than the slow HTTPS cmd=Download API, using a small bounded worker
@@ -493,28 +554,41 @@ async def download_videos(
         downloaded_count = [0]
         progress_state = {"last_bucket": -1}
 
-        await asyncio.gather(
-            *(
-                _download_worker(
-                    worker_id,
-                    ip,
-                    username,
-                    password,
-                    debug,
-                    queue,
-                    len(jobs),
-                    channel_totals,
-                    channel_done,
-                    channel_errors,
-                    channel_names,
-                    notifier,
-                    downloaded_count,
-                    progress_state,
-                )
-                for worker_id in range(concurrency)
-            ),
-            return_exceptions=True,
+        heartbeat_task = asyncio.create_task(
+            _periodic_progress_heartbeat(
+                PROGRESS_HEARTBEAT_INTERVAL_SECONDS, len(jobs), downloaded_count,
+                channel_errors, notifier, time.monotonic(),
+            )
         )
+        try:
+            await asyncio.gather(
+                *(
+                    _download_worker(
+                        worker_id,
+                        ip,
+                        username,
+                        password,
+                        debug,
+                        queue,
+                        len(jobs),
+                        channel_totals,
+                        channel_done,
+                        channel_errors,
+                        channel_names,
+                        notifier,
+                        downloaded_count,
+                        progress_state,
+                    )
+                    for worker_id in range(concurrency)
+                ),
+                return_exceptions=True,
+            )
+        finally:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
 
         downloaded = downloaded_count[0]
         total_failed = len(jobs) - downloaded
@@ -525,6 +599,7 @@ async def download_videos(
             total_downloaded=downloaded,
             total_failed=total_failed,
             output_dir=str(output_dir),
+            already_present=already_downloaded,
         )
 
     except Exception as e:

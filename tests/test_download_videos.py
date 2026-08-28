@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from pathlib import Path
 
@@ -309,3 +310,120 @@ async def test_worker_gives_up_after_exhausting_reconnect_attempts(tmp_path, mon
 
     assert fake_bc_cls.calls == []
     assert "giving up on this worker" in capsys.readouterr().err
+
+
+async def test_resumes_by_skipping_files_already_on_disk(tmp_path, monkeypatch):
+    recordings = {
+        (0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("ch0_a", 1), ("ch0_b", 2)]),
+    }
+    fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls()
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    # Simulate a previous run that already downloaded ch0_a (as a .h264,
+    # since real downloads never get a .mp4 extension anymore).
+    channel_dir = tmp_path / "2024-01-15" / "ch00_Cam0"
+    channel_dir.mkdir(parents=True)
+    (channel_dir / "20240115_010000_wide_ch0_a.h264").write_bytes(b"already here")
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        concurrency=1,
+        notifier=notifier,
+    )
+
+    # Only ch0_b was actually attempted -- ch0_a was skipped as already present.
+    assert fake_bc_cls.calls == [(0, "20240115_020000_wide_ch0_b")]
+    assert any("already on disk" in m for m in notifier.messages)
+
+
+async def test_resume_with_nothing_left_to_download(tmp_path, monkeypatch):
+    recordings = {(0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("ch0_a", 1)])}
+    fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls()
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    channel_dir = tmp_path / "2024-01-15" / "ch00_Cam0"
+    channel_dir.mkdir(parents=True)
+    (channel_dir / "20240115_010000_wide_ch0_a.h265").write_bytes(b"already here")
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        notifier=notifier,
+    )
+
+    assert fake_bc_cls.calls == []  # never even connected to download anything
+    assert any("Found: 1, downloaded: 0, failed: 0, 1 already on disk" in m for m in notifier.messages)
+
+
+async def test_hourly_heartbeat_reports_progress_on_a_timer(tmp_path, monkeypatch):
+    monkeypatch.setattr(rd, "PROGRESS_HEARTBEAT_INTERVAL_SECONDS", 0.05)
+    recordings = {(0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("a", 1), ("b", 2)])}
+    fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls(download_delay=0.08)
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        concurrency=1,
+        notifier=notifier,
+    )
+
+    heartbeats = [m for m in notifier.messages if "Still running" in m]
+    assert len(heartbeats) >= 1
+    assert "elapsed" in heartbeats[0]
+
+
+async def test_no_heartbeat_after_download_phase_completes(tmp_path, monkeypatch):
+    # The heartbeat task must be cancelled once downloads finish, not linger
+    # and fire a stray message after the run has already reported completion.
+    monkeypatch.setattr(rd, "PROGRESS_HEARTBEAT_INTERVAL_SECONDS", 0.05)
+    recordings = {(0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("a", 1)])}
+    fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls()
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        concurrency=1,
+        notifier=notifier,
+    )
+    message_count_at_finish = len(notifier.messages)
+    await asyncio.sleep(0.2)  # well past several heartbeat intervals
+    assert len(notifier.messages) == message_count_at_finish

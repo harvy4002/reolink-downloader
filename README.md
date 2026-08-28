@@ -97,6 +97,16 @@ reconnect attempts, any other workers (`--concurrency` > 1) simply pick up the r
 only with `--concurrency 1` (no other worker to fall back on) would a total connection
 failure leave the queue unprocessed.
 
+## Resuming interrupted runs
+
+Re-running the same `--start-time`/`--end-time`/`--channel` range is safe and cheap: for
+each recording found, the tool checks whether its output file already exists on disk
+(as either `.h264` or `.h265` — whichever the camera happened to send) and skips it if
+so, printing how many were skipped and only downloading what's actually missing. This
+makes it fine to kill and re-run a large job (thousands of files can take hours) after
+an interruption — a container restart, a Ctrl-C, hitting the retry budget on a
+particularly bad connection — without redownloading everything from scratch.
+
 ## Telegram notifications (optional)
 
 Set these two environment variables to get run start/finish, per-channel progress,
@@ -118,6 +128,13 @@ flood the chat. Search results across all channels are likewise sent as a single
 combined message once every channel's search finishes, rather than one message per
 channel — only genuinely realtime events (progress updates, per-file errors) get their
 own message as they happen.
+
+On top of those milestone-based updates, a separate heartbeat message is sent once an
+hour on a timer regardless of how many files have completed since the last one — useful
+for confirming a long-running job (thousands of files can take many hours) is still
+alive rather than silently stalled. This is a fixed interval
+(`PROGRESS_HEARTBEAT_INTERVAL_SECONDS` in `src/reolink_downloader/__init__.py`), not
+currently a CLI flag/env var.
 
 ## Installation
 

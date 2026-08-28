@@ -90,6 +90,18 @@ class TelegramNotifier:
             f"⏳ Overall progress: {done}/{total} ({pct}%) — {succeeded} succeeded, {failed} failed"
         )
 
+    async def notify_heartbeat(
+        self, *, done: int, total: int, succeeded: int, failed: int, elapsed: str
+    ) -> None:
+        """A progress update sent purely on a timer (see
+        PROGRESS_HEARTBEAT_INTERVAL_SECONDS), independent of notify_progress's
+        milestone-based updates — confirms a long run is still alive."""
+        pct = done * 100 // total if total else 100
+        await self._send(
+            f"⏰ Still running ({elapsed} elapsed): {done}/{total} ({pct}%) — "
+            f"{succeeded} succeeded, {failed} failed"
+        )
+
     async def notify_finish(
         self,
         *,
@@ -98,10 +110,12 @@ class TelegramNotifier:
         total_downloaded: int,
         total_failed: int,
         output_dir: str,
+        already_present: int = 0,
     ) -> None:
+        already_note = f", {already_present} already on disk" if already_present else ""
         await self._send(
             f"✅ reolink-downloader: finished run against {ip}\n"
-            f"Found: {total_found}, downloaded: {total_downloaded}, failed: {total_failed}\n"
+            f"Found: {total_found}, downloaded: {total_downloaded}, failed: {total_failed}{already_note}\n"
             f"Output: {output_dir}"
         )
 

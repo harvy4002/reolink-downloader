@@ -6,6 +6,8 @@ orchestration in download_videos() can be exercised without a real NVR.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 import reolink_downloader as rd
@@ -78,7 +80,9 @@ def make_fake_host_class(*, channels, is_nvr=True, dual_lens_channels=(), names=
     return FakeHost
 
 
-def make_fake_baichuan_cls(*, fail_predicate=lambda name: False, fail_times=None, connect_fail_times=0):
+def make_fake_baichuan_cls(
+    *, fail_predicate=lambda name: False, fail_times=None, connect_fail_times=0, download_delay=0.0
+):
     """Build a fake BaichuanDownloader replacement. Records (channel, name)
     for every download() call in the returned class's `.calls` list, and
     simulates a couple of progress ticks when total_size is known.
@@ -92,6 +96,9 @@ def make_fake_baichuan_cls(*, fail_predicate=lambda name: False, fail_times=None
         the whole fake class, i.e. the worker's initial connection and any
         retry reconnections) raise on __aenter__, then succeed — simulates
         a flaky NVR connection.
+    download_delay: seconds to asyncio.sleep() inside each download() call —
+        gives background tasks (e.g. the progress heartbeat) real wall-clock
+        time to fire during an otherwise-instant fake download.
     """
     calls: list[tuple[int, str]] = []
     attempt_counts: dict[str, int] = {}
@@ -112,6 +119,8 @@ def make_fake_baichuan_cls(*, fail_predicate=lambda name: False, fail_times=None
             return None
 
         async def download(self, out_path, *, start, end, channel, stream_type, total_size=None, on_progress=None):
+            if download_delay:
+                await asyncio.sleep(download_delay)
             calls.append((channel, out_path.name))
             attempt_counts[out_path.name] = attempt_counts.get(out_path.name, 0) + 1
             if on_progress is not None and total_size:
