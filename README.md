@@ -156,10 +156,15 @@ files would otherwise be as noisy as the per-file spam Telegram already avoids e
 Re-running the same `--start-time`/`--end-time`/`--channel` range is safe and cheap: for
 each recording found, the tool checks whether its output file already exists on disk
 (as either `.h264` or `.h265` — whichever the camera happened to send) and skips it if
-so, printing how many were skipped and only downloading what's actually missing. This
-makes it fine to kill and re-run a large job (thousands of files can take hours) after
-an interruption — a container restart, a Ctrl-C, hitting the retry budget on a
-particularly bad connection — without redownloading everything from scratch.
+so, only downloading what's actually missing. This makes it fine to kill and re-run a
+large job (thousands of files can take hours) after an interruption — a container
+restart, a Ctrl-C, hitting the retry budget on a particularly bad connection — without
+redownloading everything from scratch.
+
+This already-downloaded check happens per channel as part of the search step, before any
+downloads start, so the search summary (console and Telegram, see below) reports it
+immediately — e.g. `ch0 (Front Door): 12 found (5 already downloaded, 7 new)` — rather
+than only becoming visible once downloads are already under way.
 
 A `SIGTERM` (what Docker/Portainer/Container Manager send on stop or restart, before
 force-killing with `SIGKILL` if the process doesn't exit in time) is caught and logged
@@ -187,7 +192,10 @@ message when the job completes), rather than on every file, so a large job doesn
 flood the chat. Search results across all channels are likewise sent as a single
 combined message once every channel's search finishes, rather than one message per
 channel — only genuinely realtime events (progress updates, per-file errors) get their
-own message as they happen.
+own message as they happen. That search summary includes, per channel, how many of the
+found recordings are already on disk from a previous run — e.g. `ch0 (Front Door): 12
+found (5 already downloaded, 7 new)` — so resuming an interrupted run is visible right
+from the start, not just in the final summary.
 
 On top of those milestone-based updates, a separate heartbeat message is sent once an
 hour on a timer regardless of how many files have completed since the last one — useful

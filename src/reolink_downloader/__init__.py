@@ -83,6 +83,37 @@ def _slug(name: str) -> str:
     return slug or "unnamed"
 
 
+def _recording_output_path(
+    output_dir: Path, channel: int, channel_name: str, lens_label: str, vod_file: object, fallback_id: object
+) -> Path:
+    """Compute the <output>/<date>/ch{NN}_<name>/<file> path a recording
+    would be written to (pure — no filesystem access). Shared between the
+    search-time already-downloaded count and the actual job-building loop,
+    so the two always agree on what "already downloaded" means.
+
+    fallback_id is only used for the (rare) case a recording is missing
+    file_name/start_time metadata; the two call sites use different id
+    schemes (a per-channel position vs. a global one), so in that specific
+    edge case the two computations could disagree — not worth the added
+    complexity of unifying for something this uncommon.
+    """
+    file_name = vod_file.file_name
+    start_time_obj = vod_file.start_time
+    date_str = start_time_obj.strftime("%Y-%m-%d") if start_time_obj else "unknown-date"
+    channel_dir_name = f"ch{channel:02d}_{_slug(channel_name)}"
+    clean_file_name = Path(file_name).name if file_name else f"recording_{fallback_id}"
+    if clean_file_name.endswith(".mp4"):
+        clean_file_name = clean_file_name[:-4]
+    timestamp_str = start_time_obj.strftime("%Y%m%d_%H%M%S") if start_time_obj else f"recording_{fallback_id}"
+    return output_dir / date_str / channel_dir_name / f"{timestamp_str}_{lens_label}_{clean_file_name}"
+
+
+def _already_downloaded(output_base: Path) -> bool:
+    """A recording already sitting on disk from a previous run, as either a
+    .h264 or .h265 file — whichever the camera happened to send."""
+    return output_base.with_suffix(".h264").exists() or output_base.with_suffix(".h265").exists()
+
+
 def _format_duration(seconds: float) -> str:
     total_seconds = int(seconds)
     hours, remainder = divmod(total_seconds, 3600)
@@ -504,18 +535,39 @@ async def download_videos(
             return_exceptions=True,
         )
         all_vod_files: list[tuple[int, str, object]] = []
-        search_summary: list[tuple[int, str, int]] = []
+        search_summary: list[tuple[int, str, int, int]] = []
         for channel, result in zip(selected_channels, results):
             if isinstance(result, Exception):
                 print(f"Channel {channel}: search task failed: {result}", file=sys.stderr)
-                search_summary.append((channel, channel_names[channel], -1))
+                search_summary.append((channel, channel_names[channel], -1, 0))
                 continue
             all_vod_files.extend(result)
-            search_summary.append((channel, channel_names[channel], len(result)))
+            # How many of this channel's found recordings are already on disk
+            # from a previous run — computed now (rather than waiting for the
+            # job-building loop below) so the search summary itself can show
+            # it per channel.
+            skipped = sum(
+                1
+                for idx, (c, lens_label, vod_file) in enumerate(result, 1)
+                if _already_downloaded(
+                    _recording_output_path(output_dir, c, channel_names[c], lens_label, vod_file, idx)
+                )
+            )
+            search_summary.append((channel, channel_names[channel], len(result), skipped))
 
         # One combined message for all channels rather than one per channel —
         # this isn't a "realtime" event, it's a single batch of search results
-        # that all land at roughly the same time anyway.
+        # that all land at roughly the same time anyway. Printed to the
+        # console too, since this is the first point with a per-channel view
+        # of how many found recordings are already downloaded vs. new.
+        print("Search results:")
+        for channel, name, found, skipped in search_summary:
+            if found < 0:
+                print(f"  ch{channel} ({name}): search failed")
+            elif skipped:
+                print(f"  ch{channel} ({name}): {found} found ({skipped} already downloaded, {found - skipped} new)")
+            else:
+                print(f"  ch{channel} ({name}): {found} found")
         await notifier.notify_search_summary(results=search_summary)
 
         if not all_vod_files:
@@ -551,31 +603,19 @@ async def download_videos(
         # (as either a .h264 or .h265 file — whichever the camera happened to
         # send) is skipped rather than re-downloaded, so re-running after an
         # interruption only fetches what's actually missing.
-        day_channel_dirs: dict[tuple[str, int], Path] = {}
+        created_dirs: set[Path] = set()
         jobs: list[DownloadJob] = []
         channel_totals: dict[int, int] = {}
         already_downloaded = 0
         for position, (channel, lens_label, vod_file) in enumerate(all_vod_files, 1):
-            file_name = vod_file.file_name
-            start_time_obj = vod_file.start_time
-            date_str = start_time_obj.strftime("%Y-%m-%d") if start_time_obj else "unknown-date"
-
-            dir_key = (date_str, channel)
-            if dir_key not in day_channel_dirs:
-                day_channel_dir = output_dir / date_str / f"ch{channel:02d}_{_slug(channel_names[channel])}"
-                day_channel_dir.mkdir(parents=True, exist_ok=True)
-                day_channel_dirs[dir_key] = day_channel_dir
-            day_channel_dir = day_channel_dirs[dir_key]
-
-            clean_file_name = Path(file_name).name if file_name else f"recording_{position}"
-            if clean_file_name.endswith(".mp4"):
-                clean_file_name = clean_file_name[:-4]
-            timestamp_str = (
-                start_time_obj.strftime("%Y%m%d_%H%M%S") if start_time_obj else f"recording_{position}"
+            output_base = _recording_output_path(
+                output_dir, channel, channel_names[channel], lens_label, vod_file, position
             )
-            output_base = day_channel_dir / f"{timestamp_str}_{lens_label}_{clean_file_name}"
+            if output_base.parent not in created_dirs:
+                output_base.parent.mkdir(parents=True, exist_ok=True)
+                created_dirs.add(output_base.parent)
 
-            if output_base.with_suffix(".h264").exists() or output_base.with_suffix(".h265").exists():
+            if _already_downloaded(output_base):
                 already_downloaded += 1
                 continue
 

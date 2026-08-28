@@ -346,6 +346,49 @@ async def test_resumes_by_skipping_files_already_on_disk(tmp_path, monkeypatch):
     assert any("already on disk" in m for m in notifier.messages)
 
 
+async def test_search_summary_reports_already_downloaded_per_channel(tmp_path, monkeypatch, capsys):
+    # ch0 has one file already on disk from a previous run; ch1 has none.
+    # The per-channel skip count should show up in the search summary
+    # itself (both console and Telegram), not just later once downloads
+    # start.
+    recordings = {
+        (0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("ch0_a", 1), ("ch0_b", 2)]),
+        (1, "main"): _recordings(channel=1, stream="main", names_and_hours=[("ch1_a", 1)]),
+    }
+    fake_host_cls = make_fake_host_class(
+        channels=[0, 1], names={0: "Front Door", 1: "Backyard"}, recordings=recordings
+    )
+    fake_bc_cls = make_fake_baichuan_cls()
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    channel_dir = tmp_path / "2024-01-15" / "ch00_Front-Door"
+    channel_dir.mkdir(parents=True)
+    (channel_dir / "20240115_010000_wide_ch0_a.h264").write_bytes(b"already here")
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        concurrency=1,
+        notifier=notifier,
+    )
+
+    console_out = capsys.readouterr().out
+    assert "ch0 (Front Door): 2 found (1 already downloaded, 1 new)" in console_out
+    assert "ch1 (Backyard): 1 found" in console_out
+
+    search_message = next(m for m in notifier.messages if "Search complete" in m)
+    assert "ch0 (Front Door): 2 found (1 already downloaded, 1 new)" in search_message
+    assert "ch1 (Backyard): 1 found" in search_message
+
+
 async def test_resume_with_nothing_left_to_download(tmp_path, monkeypatch):
     recordings = {(0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("ch0_a", 1)])}
     fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)

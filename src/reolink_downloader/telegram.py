@@ -56,14 +56,19 @@ class TelegramNotifier:
             f"Range: {start_time} → {end_time}"
         )
 
-    async def notify_search_summary(self, *, results: list[tuple[int, str, int]]) -> None:
+    async def notify_search_summary(self, *, results: list[tuple[int, str, int, int]]) -> None:
         """One combined message covering every searched channel's result,
         rather than a separate message per channel — search across channels
-        finishes as a single batch, not a stream of realtime events."""
+        finishes as a single batch, not a stream of realtime events.
+
+        results: (channel, name, found, skipped) — skipped is how many of
+        `found` are already on disk from a previous run."""
         lines = []
-        for channel, name, found in results:
+        for channel, name, found, skipped in results:
             if found < 0:
                 lines.append(f"  ch{channel} ({name}): search failed")
+            elif skipped:
+                lines.append(f"  ch{channel} ({name}): {found} found ({skipped} already downloaded, {found - skipped} new)")
             else:
                 lines.append(f"  ch{channel} ({name}): {found} found")
         await self._send("🔍 Search complete:\n" + "\n".join(lines))

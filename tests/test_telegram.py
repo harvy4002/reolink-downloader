@@ -73,12 +73,12 @@ class TestSendsWhenEnabled:
 
         with patch("aiohttp.ClientSession", return_value=session_cm):
             await notifier.notify_search_summary(
-                results=[(0, "Front Door", 5), (1, "Backyard", 0), (2, "Garage", -1)]
+                results=[(0, "Front Door", 5, 2), (1, "Backyard", 0, 0), (2, "Garage", -1, 0)]
             )
 
         session.post.assert_called_once()  # one message for all 3 channels
         text = session.post.call_args.kwargs["data"]["text"]
-        assert "ch0 (Front Door): 5 found" in text
+        assert "ch0 (Front Door): 5 found (2 already downloaded, 3 new)" in text
         assert "ch1 (Backyard): 0 found" in text
         assert "ch2 (Garage): search failed" in text
 
