@@ -166,6 +166,18 @@ downloads start, so the search summary (console and Telegram, see below) reports
 immediately — e.g. `ch0 (Front Door): 12 found (5 already downloaded, 7 new)` — rather
 than only becoming visible once downloads are already under way.
 
+A recording is only ever written to its final `.h264`/`.h265` filename after the entire
+clip has been received and processed, so a crash *during* a download (network read phase)
+leaves no file at all for that clip — it's correctly detected as missing and retried in
+full next run. The one narrow gap this doesn't cover on its own — a crash during the
+final disk write itself — is closed by writing to a temporary `.part` file first and
+atomically renaming it into place only once the write fully succeeds; the resumability
+check only recognizes the final `.h264`/`.h265` name, so a crash mid-write can never
+leave a truncated file silently masquerading as a completed download. A received stream
+that's grossly smaller than the size the camera itself reports for that recording (even
+if the connection signaled a clean end-of-stream) is also treated as incomplete and
+retried, rather than silently kept.
+
 A `SIGTERM` (what Docker/Portainer/Container Manager send on stop or restart, before
 force-killing with `SIGKILL` if the process doesn't exit in time) is caught and logged
 before shutting down, so a deliberate stop is distinguishable in the logs from an actual

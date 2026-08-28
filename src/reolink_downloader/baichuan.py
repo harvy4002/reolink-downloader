@@ -63,6 +63,16 @@ WAITING_NOTICE_INTERVAL_SECONDS = 15.0
 # memory-constrained device (see download()'s copy-avoidance comment below).
 LARGE_DOWNLOAD_WARNING_BYTES = 150_000_000
 
+# If the camera reports this recording's file size (total_size, passed by
+# the caller — usually vod_file.size from the search result) and we receive
+# meaningfully less than that despite a clean end-of-stream signal, treat it
+# as an incomplete download rather than silently keeping a truncated file.
+# The raw BCMEDIA stream we collect isn't byte-identical to the camera's own
+# reported file size (container/audio overhead differs), so this is a
+# generous tolerance meant only to catch a stream that's grossly short, not
+# to demand an exact match.
+MIN_RECEIVED_SIZE_RATIO = 0.5
+
 # A request/response correlation id we put in the download request; the camera
 # echoes it on every media message. The value is arbitrary.
 MEDIA_MESS_ID = 54
@@ -460,6 +470,12 @@ class BaichuanDownloader:
                 "if this keeps happening on a memory-constrained device, it may be worth checking "
                 "why a single clip covers this much time (see README's clip-count discrepancy notes)."
             )
+        if total_size and len(media) < total_size * MIN_RECEIVED_SIZE_RATIO:
+            raise BaichuanError(
+                f"received only {len(media)} bytes but the camera reports this recording as "
+                f"~{total_size} bytes ({len(media) / total_size:.0%}) — likely an incomplete "
+                f"download despite a clean end-of-stream signal"
+            )
 
         # deframe_video/sniff_codec only ever slice their input, so pass the
         # bytearray we already have directly rather than copying it into a
@@ -474,7 +490,19 @@ class BaichuanDownloader:
         codec = sniff_codec(video)
         self._dbg(f"decoded {codec} {info} video_bytes={len(video)}")
         raw_path = out_path.with_suffix(f".{codec}")
-        raw_path.write_bytes(video)
+        # Write to a temp file and atomically rename into place, rather than
+        # writing straight to raw_path. The resumability check in
+        # __init__.py only checks whether the final .h264/.h265 file
+        # *exists*, not whether it's complete -- if the process were killed
+        # mid-write (a real risk on a memory-constrained device), writing
+        # directly to raw_path could leave a truncated file that gets
+        # silently treated as "already downloaded" forever. A crash here now
+        # leaves either the complete final file, or a harmless `.part` file
+        # that resumability doesn't recognize, so the recording just gets
+        # retried fresh on the next run.
+        tmp_path = raw_path.with_name(raw_path.name + ".part")
+        tmp_path.write_bytes(video)
+        tmp_path.replace(raw_path)
         return raw_path
 
     def _decrypt_media_body(self, body: bytes, poff: int) -> bytes:
