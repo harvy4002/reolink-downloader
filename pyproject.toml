@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "reolink-aio>=0.16.4",
+    "aiohttp>=3.9",
 ]
 
 [project.scripts]
@@ -14,3 +15,12 @@ reolink-downloader = "reolink_downloader:main"
 [build-system]
 requires = ["uv_build>=0.9.7,<0.10.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

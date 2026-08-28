@@ -23,6 +23,7 @@ import re
 import shutil
 import struct
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import md5
@@ -311,12 +312,20 @@ class BaichuanDownloader:
         stream_type: str = "mainStream",
         logic_bitmap: int = 255,
         remux_mp4: bool = True,
+        total_size: int | None = None,
+        on_progress: Callable[[int, int | None], None] | None = None,
     ) -> Path:
         """Download the recording covering ``start``–``end`` to ``out_path``.
 
         Writes a raw ``.h264``/``.h265`` elementary stream, then remuxes to
         ``.mp4`` with ffmpeg when available (and ``remux_mp4``). Returns the path
         actually written.
+
+        ``on_progress``, if given, is called as ``on_progress(bytes_so_far,
+        total_size)`` after each media message is received (``total_size`` is
+        whatever the caller passed in — usually the on-camera file size — and
+        may be ``None`` if unknown). Exceptions raised by the callback are
+        swallowed so a logging bug can never abort an in-progress download.
         """
         if self._key is None:
             raise BaichuanError("not logged in")
@@ -361,6 +370,11 @@ class BaichuanDownloader:
                           f"decoded_head={chunk[:8].hex()}")
             media += chunk
             nmsg += 1
+            if on_progress is not None:
+                try:
+                    on_progress(len(media), total_size)
+                except Exception:
+                    pass
         self._dbg(f"collected {len(media)} media bytes from {nmsg} media messages")
 
         video, info = deframe_video(bytes(media))
