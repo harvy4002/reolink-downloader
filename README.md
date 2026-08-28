@@ -170,6 +170,32 @@ this repo's `.gitignore`.
 To pin to a specific release instead of always tracking `main`, set `REPO_REF` to a tag
 or commit SHA (and `REPO_URL` if you want to point at a fork).
 
+> **Keep every `environment:` value quoted**, even after editing it — YAML parses an
+> unquoted date/number/boolean-shaped value (e.g. `2024-01-01`, `false`) as that native
+> type instead of a string, and Compose then rejects it (e.g. an unquoted
+> `REOLINK_START_TIME` fails with `invalid jsonType time.Time`). The file already quotes
+> everything; just don't remove the quotes when you fill in real values.
+
+### Portainer
+
+Portainer's Stacks feature is generally more reliable than Synology's own Container
+Manager for this (see below) — if Container Manager gives you trouble, this is the
+easiest path:
+
+1. **Stacks → Add stack**, name it (e.g. `reolink-downloader`).
+2. Paste the contents of `docker-compose.yml` into the web editor — or use "Repository"
+   mode pointed at `https://github.com/harvy4002/reolink-downloader.git`, file path
+   `docker-compose.yml`.
+3. Edit the `environment:` values for your camera directly in the editor (keeping them
+   quoted, per above), or use Portainer's own "Environment variables" section instead of
+   hardcoding them into the stack.
+4. Deploy the stack.
+
+If it can't pull the image, Portainer has its own registry credential manager:
+**Registries → Add registry → Custom registry**, URL `https://ghcr.io`, your GitHub
+username, and a [Personal Access Token (classic)](https://github.com/settings/tokens)
+scoped to `read:packages` as the password.
+
 ### Synology Container Manager
 
 1. Copy just `docker-compose.yml` into a shared folder (e.g. `docker/reolink-downloader`)

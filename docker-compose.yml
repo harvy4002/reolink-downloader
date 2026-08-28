@@ -37,39 +37,45 @@ services:
       # doesn't need to re-fetch them from PyPI after the fresh git clone.
       - uv-cache:/root/.cache/uv
     environment:
+      # IMPORTANT: keep every value below quoted, even after you edit it. YAML
+      # treats an unquoted date/number/boolean-shaped value (e.g. 2024-01-01,
+      # or true/false) as that native type instead of a string, and Docker
+      # Compose then rejects it — e.g. an unquoted REOLINK_START_TIME fails
+      # with "invalid jsonType time.Time". Quotes keep it a plain string.
+
       # --- Which code to run. Defaults to this repo's main branch; override
       # REPO_REF to pin to a tag/commit, or REPO_URL to point at a fork. ---
-      REPO_URL: ${REPO_URL:-https://github.com/harvy4002/reolink-downloader.git}
-      REPO_REF: ${REPO_REF:-main}
+      REPO_URL: "${REPO_URL:-https://github.com/harvy4002/reolink-downloader.git}"
+      REPO_REF: "${REPO_REF:-main}"
 
       # --- Required: no defaults, so a typo/omission still gets caught by the
       # tool's own "missing required option" error rather than silently running. ---
-      REOLINK_IP: ${REOLINK_IP}              # e.g. 192.168.1.100
-      REOLINK_USERNAME: ${REOLINK_USERNAME}  # e.g. admin
-      REOLINK_PASSWORD: ${REOLINK_PASSWORD}  # e.g. changeme
-      REOLINK_START_TIME: ${REOLINK_START_TIME}  # e.g. 2024-01-01 or "2024-01-01 14:30:00"
-      REOLINK_END_TIME: ${REOLINK_END_TIME}      # e.g. 2024-01-02
+      REOLINK_IP: "${REOLINK_IP}"              # e.g. 192.168.1.100
+      REOLINK_USERNAME: "${REOLINK_USERNAME}"  # e.g. admin
+      REOLINK_PASSWORD: "${REOLINK_PASSWORD}"  # e.g. changeme
+      REOLINK_START_TIME: "${REOLINK_START_TIME}"  # e.g. 2024-01-01 or "2024-01-01 14:30:00"
+      REOLINK_END_TIME: "${REOLINK_END_TIME}"      # e.g. 2024-01-02
 
       # --- Optional: shown with the tool's actual defaults. ---
       # Channel(s) to download: 'all', a single index, a comma list, a range, or a
       # combination — e.g. '0', '0,2,5', '0-3', '0,2-4,7'.
-      REOLINK_CHANNEL: ${REOLINK_CHANNEL:-all}
+      REOLINK_CHANNEL: "${REOLINK_CHANNEL:-all}"
       # Concurrent Baichuan download connections. Reolink PoE NVRs support at most 4
       # concurrent playback streams.
-      REOLINK_CONCURRENCY: ${REOLINK_CONCURRENCY:-3}
+      REOLINK_CONCURRENCY: "${REOLINK_CONCURRENCY:-3}"
       # wide, telephoto, or both — only matters for cameras/channels with a second
       # (telephoto) lens; automatically ignored elsewhere.
-      REOLINK_LENS: ${REOLINK_LENS:-both}
+      REOLINK_LENS: "${REOLINK_LENS:-both}"
       # Cap on total recordings downloaded across all selected channels. Leave the
       # substitution default empty to download everything found.
-      REOLINK_LIMIT: ${REOLINK_LIMIT:-}
+      REOLINK_LIMIT: "${REOLINK_LIMIT:-}"
       # Print the raw Baichuan protocol exchange, for diagnosing a failed download.
-      REOLINK_DEBUG: ${REOLINK_DEBUG:-false}
+      REOLINK_DEBUG: "${REOLINK_DEBUG:-false}"
 
       # --- Optional: Telegram notifications. Both must be set to enable them; leave
       # both empty (the default) to disable. ---
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
 
       # Do NOT set REOLINK_OUTPUT here — the image fixes it to /downloads, which the
       # volume line above bind-mounts to ./downloads next to this file. Change the
