@@ -125,6 +125,18 @@ the same way a stalled connection is. Even without `--debug`, you'll see a perio
 `Still waiting for media data (N unrelated message(s) from camera so far)...` notice
 while this is happening, so it isn't silent.
 
+### Memory usage on constrained devices (e.g. a Synology NAS)
+
+A recording is fully buffered in memory while it downloads, then deframed into a raw
+Annex-B stream before being written to disk. For a typical short motion clip this is a
+non-issue, but a much longer continuous/timer recording reported as a single "file" can
+mean hundreds of MB (or more) held in memory at once — and with `--concurrency` > 1,
+that's per concurrent download. A single recording collecting more than ~150 MB prints a
+console warning, since that usually means a "file" covers far more time than a typical
+short clip — worth checking whether that's expected for your recording schedule. The
+deframing step itself reuses the same buffer rather than making extra full copies of it,
+to keep the peak memory overhead as low as it reasonably can be.
+
 ## Resuming interrupted runs
 
 Re-running the same `--start-time`/`--end-time`/`--channel` range is safe and cheap: for

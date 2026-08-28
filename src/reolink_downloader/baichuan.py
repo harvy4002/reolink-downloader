@@ -56,6 +56,13 @@ NO_PROGRESS_TIMEOUT_SECONDS = 60.0
 # even without --debug.
 WAITING_NOTICE_INTERVAL_SECONDS = 15.0
 
+# A single recording collecting more raw media bytes than this gets a
+# console warning — a short motion clip should be a few MB to a few tens of
+# MB; anything far past that is likely a much longer continuous/timer
+# recording than expected, which is worth knowing about on a
+# memory-constrained device (see download()'s copy-avoidance comment below).
+LARGE_DOWNLOAD_WARNING_BYTES = 150_000_000
+
 # A request/response correlation id we put in the download request; the camera
 # echoes it on every media message. The value is arbitrary.
 MEDIA_MESS_ID = 54
@@ -132,7 +139,7 @@ def _reolink_time(dt: datetime) -> str:
     )
 
 
-def sniff_codec(vbuf: bytes) -> str:
+def sniff_codec(vbuf: bytes | bytearray) -> str:
     """Detect h264 vs h265 from the Annex-B NAL stream.
 
     Reolink's BCMEDIA ``video_type`` field is unreliable (a TrackMix reports
@@ -158,7 +165,7 @@ def _pad8(n: int) -> int:
     return (8 - n % 8) % 8
 
 
-def deframe_video(stream: bytes) -> tuple[bytearray, dict | None]:
+def deframe_video(stream: bytes | bytearray) -> tuple[bytearray, dict | None]:
     """Parse a BCMEDIA byte stream; return (annex_b_video, info_dict)."""
     vbuf = bytearray()
     info: dict | None = None
@@ -426,12 +433,24 @@ class BaichuanDownloader:
                 except Exception:
                     pass
         self._dbg(f"collected {len(media)} media bytes from {nmsg} media messages")
+        if len(media) > LARGE_DOWNLOAD_WARNING_BYTES:
+            print(
+                f"  Warning: this recording is unusually large ({len(media) / 1_000_000:.0f} MB) — "
+                "if this keeps happening on a memory-constrained device, it may be worth checking "
+                "why a single clip covers this much time (see README's clip-count discrepancy notes)."
+            )
 
-        video, info = deframe_video(bytes(media))
+        # deframe_video/sniff_codec only ever slice their input, so pass the
+        # bytearray we already have directly rather than copying it into a
+        # new `bytes` object first — for a large recording (hundreds of MB+)
+        # those copies could transiently need well over 2x the memory of the
+        # recording itself, which is enough to trigger an OOM kill on a
+        # memory-constrained NAS.
+        video, info = deframe_video(media)
         if not video:
             raise BaichuanError("no video frames decoded (wrong time range or password?)")
 
-        codec = sniff_codec(bytes(video))
+        codec = sniff_codec(video)
         self._dbg(f"decoded {codec} {info} video_bytes={len(video)}")
         raw_path = out_path.with_suffix(f".{codec}")
         raw_path.write_bytes(video)

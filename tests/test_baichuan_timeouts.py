@@ -85,3 +85,42 @@ async def test_download_gives_up_when_flooded_with_unrelated_messages(monkeypatc
 
     # Even without --debug, this failure mode gets some visibility.
     assert "Still waiting for media data" in capsys.readouterr().out
+
+
+async def test_large_download_prints_a_warning(monkeypatch, capsys):
+    # Threshold set tiny so an ordinary small fake chunk trips it, rather
+    # than actually allocating hundreds of MB in a unit test.
+    monkeypatch.setattr(bc_module, "LARGE_DOWNLOAD_WARNING_BYTES", 10)
+
+    downloader = BaichuanDownloader("127.0.0.1", "user", "pass")
+    downloader._key = b"0123456789abcdef"
+
+    # poff=4 with no <encryptLen> tag in the "encrypted" prefix means
+    # _decrypt_media_body returns body[poff:] unchanged -- convenient for a
+    # fake, since we don't need real AES-encrypted content, just enough
+    # bytes to cross the (lowered) size threshold.
+    responses = iter(
+        [
+            (143, 54, 200, "1464", 4, b"\x00\x00\x00\x00" + b"\x01" * 50),
+            (143, 54, 200, "1464", 0, b""),  # end of stream
+        ]
+    )
+
+    async def fake_send(*args, **kwargs):
+        return None
+
+    async def fake_read_message():
+        return next(responses)
+
+    monkeypatch.setattr(downloader, "_send", fake_send)
+    monkeypatch.setattr(downloader, "_read_message", fake_read_message)
+
+    # The fake payload isn't real BCMEDIA framing, so deframe_video finds no
+    # video frames and download() raises after the warning is printed --
+    # that's fine, the warning is what this test is checking for.
+    with pytest.raises(BaichuanError, match="no video frames decoded"):
+        await downloader.download(
+            Path("/tmp/unused"), start=datetime(2024, 1, 1), end=datetime(2024, 1, 1, 0, 5)
+        )
+
+    assert "unusually large" in capsys.readouterr().out
