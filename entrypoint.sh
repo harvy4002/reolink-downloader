@@ -18,4 +18,8 @@ cd "$APP_DIR"
 # --no-dev: skip the pytest/pytest-asyncio dev-only dependency group.
 uv sync --frozen --no-dev --no-editable
 
-exec uv run reolink-downloader "$@"
+# --no-sync: `uv run` syncs the project itself by default, which does NOT
+# inherit the --no-dev/--no-editable flags above — without this it silently
+# reinstalls the dev dependency group (pytest etc.) and switches back to an
+# editable install on every single run.
+exec uv run --no-sync reolink-downloader "$@"

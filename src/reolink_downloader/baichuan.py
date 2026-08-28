@@ -389,6 +389,8 @@ class BaichuanDownloader:
         if remux_mp4 and shutil.which("ffmpeg"):
             mp4_path = out_path.with_suffix(".mp4")
             fps = info.get("fps") if info else None
+            if codec == "h265":
+                self._dbg("transcoding h265 -> h264 for broad player/thumbnail compatibility")
             if _remux_to_mp4(raw_path, mp4_path, codec=codec, fps=fps):
                 raw_path.unlink(missing_ok=True)
                 return mp4_path
@@ -410,18 +412,24 @@ class BaichuanDownloader:
 
 
 def _remux_to_mp4(raw_path: Path, mp4_path: Path, *, codec: str = "h264", fps: int | None = None) -> bool:
-    """Remux a raw elementary stream into MP4 with ffmpeg (copy, no transcode).
+    """Write a raw elementary stream into MP4 with ffmpeg.
 
     A raw Annex-B stream has no container timing, so we pass the real frame rate
-    (from the BCMEDIA InfoFrame) as the input rate. HEVC is tagged ``hvc1`` rather
-    than ffmpeg's default ``hev1`` so the result plays in QuickTime/Apple players.
+    (from the BCMEDIA InfoFrame) as the input rate.
+
+    H.264 sources are remuxed losslessly (``-c copy``, no re-encode). H.265
+    sources are transcoded to H.264 instead: web-based previews/thumbnails
+    (e.g. Synology's Video Station/Photos) commonly can't decode HEVC, while
+    H.264 plays everywhere, so the extra CPU time buys universal playback.
     """
     cmd = ["ffmpeg", "-y"]
     if fps:
         cmd += ["-r", str(fps)]
-    cmd += ["-i", str(raw_path), "-c", "copy"]
+    cmd += ["-i", str(raw_path)]
     if codec == "h265":
-        cmd += ["-tag:v", "hvc1"]
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+    else:
+        cmd += ["-c", "copy"]
     cmd += ["-movflags", "+faststart", str(mp4_path)]
     try:
         result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
