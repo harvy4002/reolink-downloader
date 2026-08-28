@@ -5,10 +5,9 @@ FROM python:3.14-slim
 # to whatever build host runs `docker build` (this image never needs git to
 # build; that's what makes it safe to build on hosts that lack git, like
 # Synology's Container Manager).
-# ffmpeg: needed for mp4 remuxing.
 # ca-certificates: needed for the HTTPS git clone.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git ffmpeg ca-certificates \
+    && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Pin uv via the officially published binary image rather than pip-installing

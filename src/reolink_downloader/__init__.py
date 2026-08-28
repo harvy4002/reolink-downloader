@@ -433,28 +433,33 @@ async def download_videos(
             all_vod_files = all_vod_files[:limit]
             print(f"Limiting to first {len(all_vod_files)} recording(s)")
 
-        # Build the download job list, with a lazily-created per-channel
-        # output subdirectory to avoid filename collisions across channels
-        # (on-device filenames are often generic per-channel).
-        channel_dirs: dict[int, Path] = {}
+        # Build the download job list, with a lazily-created
+        # <output>/<date>/ch{NN}_<name>/ output subdirectory per day+channel,
+        # so each day's recordings are grouped by channel underneath it, and
+        # to avoid filename collisions across channels (on-device filenames
+        # are often generic per-channel).
+        day_channel_dirs: dict[tuple[str, int], Path] = {}
         jobs: list[DownloadJob] = []
         channel_totals: dict[int, int] = {}
         for idx, (channel, lens_label, vod_file) in enumerate(all_vod_files, 1):
-            if channel not in channel_dirs:
-                channel_dir = output_dir / f"ch{channel:02d}_{_slug(channel_names[channel])}"
-                channel_dir.mkdir(parents=True, exist_ok=True)
-                channel_dirs[channel] = channel_dir
-            channel_dir = channel_dirs[channel]
-
             file_name = vod_file.file_name
             start_time_obj = vod_file.start_time
+            date_str = start_time_obj.strftime("%Y-%m-%d") if start_time_obj else "unknown-date"
+
+            dir_key = (date_str, channel)
+            if dir_key not in day_channel_dirs:
+                day_channel_dir = output_dir / date_str / f"ch{channel:02d}_{_slug(channel_names[channel])}"
+                day_channel_dir.mkdir(parents=True, exist_ok=True)
+                day_channel_dirs[dir_key] = day_channel_dir
+            day_channel_dir = day_channel_dirs[dir_key]
+
             clean_file_name = Path(file_name).name if file_name else f"recording_{idx}"
             if clean_file_name.endswith(".mp4"):
                 clean_file_name = clean_file_name[:-4]
             timestamp_str = (
                 start_time_obj.strftime("%Y%m%d_%H%M%S") if start_time_obj else f"recording_{idx}"
             )
-            output_base = channel_dir / f"{timestamp_str}_{lens_label}_{clean_file_name}"
+            output_base = day_channel_dir / f"{timestamp_str}_{lens_label}_{clean_file_name}"
 
             # On dual-lens cameras/channels the lens is selected by channelId
             # (base = wide, base+1 = telephoto); logicChnBitmap stays 255 as

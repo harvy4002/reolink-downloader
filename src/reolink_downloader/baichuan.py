@@ -20,9 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-import shutil
 import struct
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -335,15 +333,14 @@ class BaichuanDownloader:
         channel: int = 0,
         stream_type: str = "mainStream",
         logic_bitmap: int = 255,
-        remux_mp4: bool = True,
         total_size: int | None = None,
         on_progress: Callable[[int, int | None], None] | None = None,
     ) -> Path:
         """Download the recording covering ``start``–``end`` to ``out_path``.
 
-        Writes a raw ``.h264``/``.h265`` elementary stream, then remuxes to
-        ``.mp4`` with ffmpeg when available (and ``remux_mp4``). Returns the path
-        actually written.
+        Writes a raw ``.h264``/``.h265`` elementary stream and returns that
+        path. No conversion/remuxing is done here — a separate tool is
+        planned for turning these into a more universally playable format.
 
         ``on_progress``, if given, is called as ``on_progress(bytes_so_far,
         total_size)`` after each media message is received (``total_size`` is
@@ -409,15 +406,6 @@ class BaichuanDownloader:
         self._dbg(f"decoded {codec} {info} video_bytes={len(video)}")
         raw_path = out_path.with_suffix(f".{codec}")
         raw_path.write_bytes(video)
-
-        if remux_mp4 and shutil.which("ffmpeg"):
-            mp4_path = out_path.with_suffix(".mp4")
-            fps = info.get("fps") if info else None
-            if codec == "h265":
-                self._dbg("transcoding h265 -> h264 for broad player/thumbnail compatibility")
-            if _remux_to_mp4(raw_path, mp4_path, codec=codec, fps=fps):
-                raw_path.unlink(missing_ok=True)
-                return mp4_path
         return raw_path
 
     def _decrypt_media_body(self, body: bytes, poff: int) -> bytes:
@@ -433,30 +421,3 @@ class BaichuanDownloader:
         enc_len = min(enc_len, len(payload))
         head = _aes(self._key).decrypt(payload[:enc_len]) if enc_len else b""
         return head + payload[enc_len:]
-
-
-def _remux_to_mp4(raw_path: Path, mp4_path: Path, *, codec: str = "h264", fps: int | None = None) -> bool:
-    """Write a raw elementary stream into MP4 with ffmpeg.
-
-    A raw Annex-B stream has no container timing, so we pass the real frame rate
-    (from the BCMEDIA InfoFrame) as the input rate.
-
-    H.264 sources are remuxed losslessly (``-c copy``, no re-encode). H.265
-    sources are transcoded to H.264 instead: web-based previews/thumbnails
-    (e.g. Synology's Video Station/Photos) commonly can't decode HEVC, while
-    H.264 plays everywhere, so the extra CPU time buys universal playback.
-    """
-    cmd = ["ffmpeg", "-y"]
-    if fps:
-        cmd += ["-r", str(fps)]
-    cmd += ["-i", str(raw_path)]
-    if codec == "h265":
-        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
-    else:
-        cmd += ["-c", "copy"]
-    cmd += ["-movflags", "+faststart", str(mp4_path)]
-    try:
-        result = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return result.returncode == 0 and mp4_path.exists()
-    except Exception:
-        return False

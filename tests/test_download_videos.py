@@ -46,12 +46,15 @@ async def test_multi_channel_search_and_download(tmp_path, monkeypatch):
         notifier=notifier,
     )
 
-    # Per-channel output directories, no filename collisions across channels.
+    # <output>/<date>/ch{NN}_<name>/ output directories, no filename
+    # collisions across channels.
     dirs = sorted(p.name for p in tmp_path.iterdir())
-    assert dirs == ["ch00_Front-Door", "ch01_Backyard"]
+    assert dirs == ["2024-01-15"]
+    channel_dirs = sorted(p.name for p in (tmp_path / "2024-01-15").iterdir())
+    assert channel_dirs == ["ch00_Front-Door", "ch01_Backyard"]
 
-    ch0_files = sorted(p.name for p in (tmp_path / "ch00_Front-Door").iterdir())
-    ch1_files = sorted(p.name for p in (tmp_path / "ch01_Backyard").iterdir())
+    ch0_files = sorted(p.name for p in (tmp_path / "2024-01-15" / "ch00_Front-Door").iterdir())
+    ch1_files = sorted(p.name for p in (tmp_path / "2024-01-15" / "ch01_Backyard").iterdir())
     assert any("ch0_a" in f for f in ch0_files)
     assert not any("ch0_b" in f for f in ch0_files)  # the failed download wrote nothing
     assert any("ch1_wide_a" in f for f in ch1_files)
@@ -185,7 +188,7 @@ async def test_transient_failure_recovers_via_retry(tmp_path, monkeypatch):
     )
 
     assert fake_bc_cls.attempt_counts["20240115_010000_wide_flaky"] == 3
-    files = list((tmp_path / "ch00_Cam0").glob("*.mp4"))
+    files = list((tmp_path / "2024-01-15" / "ch00_Cam0").glob("*.mp4"))
     assert len(files) == 1
     assert not any("failed to download" in m for m in notifier.messages)
     assert any("Found: 1, downloaded: 1, failed: 0" in m for m in notifier.messages)
@@ -214,7 +217,7 @@ async def test_permanent_failure_reported_after_exhausting_retries(tmp_path, mon
 
     # 1 initial attempt + MAX_RETRIES(3) retries = 4 total attempts, then give up.
     assert fake_bc_cls.attempt_counts["20240115_010000_wide_dead"] == rd.MAX_RETRIES + 1
-    assert list((tmp_path / "ch00_Cam0").glob("*.mp4")) == []
+    assert list((tmp_path / "2024-01-15" / "ch00_Cam0").glob("*.mp4")) == []
     error_messages = [m for m in notifier.messages if "failed to download" in m]
     assert len(error_messages) == 1
     assert "4 attempts" in error_messages[0]
@@ -242,7 +245,7 @@ async def test_worker_reconnects_after_transient_connection_failure(tmp_path, mo
         concurrency=1,
     )
 
-    files = list((tmp_path / "ch00_Cam0").glob("*.mp4"))
+    files = list((tmp_path / "2024-01-15" / "ch00_Cam0").glob("*.mp4"))
     assert len(files) == 1
 
 

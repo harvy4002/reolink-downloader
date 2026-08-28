@@ -19,18 +19,20 @@ cameras tested the HTTPS path is bottlenecked by the camera's TLS to ~800 KB/s (
 export is worse, ~88 KB/s), while the binary protocol reaches several MB/s. The protocol was
 reverse-engineered for this tool; see [`PROTOCOL.md`](PROTOCOL.md) for the full write-up.
 
-Recordings arrive as a raw H.264/H.265 elementary stream. If [`ffmpeg`](https://ffmpeg.org/)
-is on your `PATH`, files are remuxed to `.mp4`; otherwise the raw `.h264`/`.h265` stream is
-written (playable directly in VLC/ffmpeg).
+Recordings are written exactly as the camera sends them: a raw H.264/H.265 elementary
+stream (`.h264`/`.h265`), playable directly in VLC/ffmpeg. This tool intentionally does
+no conversion — a separate tool for turning these into a more universally playable
+format (e.g. `.mp4`) is planned.
 
 ## Multi-channel NVRs
 
 By default (`--channel all`) the tool auto-detects and downloads every channel your NVR
 reports. Use `--channel` to restrict to a subset: a single index (`--channel 0`), a
 comma-separated list (`--channel 0,2,5`), a range (`--channel 0-3`), or any combination
-(`--channel 0,2-4,7`). Recordings are written into a subdirectory per channel
-(`<output>/ch00_<camera-name>/...`) to avoid filename collisions, since Reolink's
-on-device filenames are often generic per channel.
+(`--channel 0,2-4,7`). Recordings are organized as
+`<output>/<date>/ch00_<camera-name>/...` — grouped by day first, then by channel — to
+avoid filename collisions, since Reolink's on-device filenames are often generic per
+channel.
 
 `--lens` (default `both`) still controls whether the wide and/or telephoto stream is
 downloaded on cameras/channels that have a second lens (e.g. TrackMix PoE); it's
@@ -65,7 +67,7 @@ Downloading [5/42] (worker 1): 20240115_140000_wide_...
   [ch0 w1] 20240115_140000_wide_...: 6.2/24.8 MB (25%)
   [ch0 w1] 20240115_140000_wide_...: 12.4/24.8 MB (50%)
   ...
-  Saved to: .../ch00_Front-Door/20240115_140000_wide_....mp4
+  Saved to: .../2024-01-15/ch00_Front-Door/20240115_140000_wide_....h264
 Overall progress: 5/42 (12%) — 5 succeeded, 0 failed
 ```
 
@@ -145,7 +147,7 @@ required options — set each one via its flag or its environment variable.
 ## Docker
 
 [`docker-compose.yml`](docker-compose.yml) uses a pre-built runtime image
-(`ghcr.io/harvy4002/reolink-downloader`) that contains only the Python/git/ffmpeg/uv
+(`ghcr.io/harvy4002/reolink-downloader`) that contains only the Python/git/uv
 toolchain — **not** the tool's code. Every time the container starts, its entrypoint
 clones the tool fresh from this repo's `main` branch, installs its dependencies, and
 runs it. That means:
