@@ -252,7 +252,11 @@ runs it. That means:
 Every setting is listed inline in `docker-compose.yml` under `environment:` with the
 tool's real defaults and an example value in a comment. This is a one-off job, not a
 long-running service — the container starts, downloads everything in the configured
-date range, and exits.
+date range, and exits. It restarts itself automatically (up to 5 times) only if it
+crashes (e.g. an out-of-memory kill) — safe to do since [resumable downloads](#resuming-interrupted-runs)
+mean a restart just picks up whatever wasn't finished. A normal successful completion
+(including "nothing left to do, already downloaded") exits cleanly and stays stopped;
+`docker compose down`/stop is always respected regardless of this policy.
 
 ```
 mkdir reolink-downloader && cd reolink-downloader
@@ -305,9 +309,11 @@ scoped to `read:packages` as the password.
 3. Edit the `environment:` values in `docker-compose.yml` for your camera, or add a
    sibling `.env` file in the same folder for anything you'd rather not leave in a
    tracked file (Compose substitutes `${VAR}` from it automatically).
-4. Start the project (no Build step needed — it only pulls). Since this is a one-off
-   job, leave the project's auto-restart setting off (the compose file also sets
-   `restart: "no"`).
+4. Start the project (no Build step needed — it only pulls). The compose file already
+   restarts the container itself on a crash (`restart: on-failure:5`) — leave Container
+   Manager's own project-level "auto-restart" setting **off** too, since it isn't
+   documented exactly how the two interact, and Container Manager's version may not
+   distinguish a crash from a normal successful exit the way `on-failure` does.
 5. To fetch a new batch, edit `REOLINK_START_TIME`/`REOLINK_END_TIME` (in the compose
    file or `.env`) and re-run. Any tool code changes on `main` are picked up
    automatically on every run — nothing to re-download.

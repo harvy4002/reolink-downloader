@@ -19,7 +19,9 @@
 #      folder — Compose substitutes `${VAR}` from it automatically).
 #   4. Run once: `docker compose up` (or, in Container Manager, Action → Start — no
 #      Build step needed, it only pulls). It downloads everything in the configured
-#      date range and exits — it does not run on a schedule.
+#      date range and exits — it does not run on a schedule. If it crashes (e.g. an
+#      OOM kill), it restarts itself automatically (up to 5 times) and picks up
+#      wherever it left off; a normal successful completion just stays stopped.
 #   5. To fetch a new batch, edit REOLINK_START_TIME/REOLINK_END_TIME and re-run. Any
 #      tool code changes on `main` are picked up automatically, every run — nothing
 #      to re-download or rebuild on your end.
@@ -86,10 +88,14 @@ services:
       # host side of that mount instead if you want recordings written elsewhere.
 
     # One-off job: downloads everything in the configured date range, then exits.
-    # Don't restart it automatically — re-run manually each time you want a new batch.
-    # On Synology's Container Manager, make sure the project's "auto-restart" setting
-    # is off for the same reason.
-    restart: "no"
+    # A *successful* run (including "nothing left to download, already resumed")
+    # exits 0 and is never restarted. "on-failure" only restarts on a crash (e.g.
+    # an OOM kill, or a fatal error) — safe to do now that resumable downloads
+    # mean a restart just picks up whatever wasn't finished rather than
+    # redownloading everything. Capped at 5 attempts so a genuinely broken config
+    # (bad IP/credentials) doesn't restart-loop forever. A deliberate `docker
+    # compose down`/stop is always respected regardless of this policy.
+    restart: "on-failure:5"
 
 volumes:
   uv-cache:
