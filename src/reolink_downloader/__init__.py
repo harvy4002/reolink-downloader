@@ -161,7 +161,6 @@ async def _search_channel(
     lenses: list[str],
     start_time: datetime,
     end_time: datetime,
-    notifier: TelegramNotifier,
 ) -> list[tuple[int, str, object]]:
     """Search one channel for recordings in the given range across the
     requested (and applicable) lenses, day by day."""
@@ -221,7 +220,6 @@ async def _search_channel(
                     found.extend((channel, lens_label, f) for f in day_files)
                     print(f"    Found {len(day_files)} file(s)")
 
-    await notifier.notify_channel_progress(channel=channel, name=name, phase="search complete", found=len(found))
     return found
 
 
@@ -397,17 +395,25 @@ async def download_videos(
         # this is safe even though it doesn't always yield a full speedup.
         results = await asyncio.gather(
             *(
-                _search_channel(host, channel, lenses, start_time, end_time, notifier)
+                _search_channel(host, channel, lenses, start_time, end_time)
                 for channel in selected_channels
             ),
             return_exceptions=True,
         )
         all_vod_files: list[tuple[int, str, object]] = []
+        search_summary: list[tuple[int, str, int]] = []
         for channel, result in zip(selected_channels, results):
             if isinstance(result, Exception):
                 print(f"Channel {channel}: search task failed: {result}", file=sys.stderr)
+                search_summary.append((channel, channel_names[channel], -1))
                 continue
             all_vod_files.extend(result)
+            search_summary.append((channel, channel_names[channel], len(result)))
+
+        # One combined message for all channels rather than one per channel —
+        # this isn't a "realtime" event, it's a single batch of search results
+        # that all land at roughly the same time anyway.
+        await notifier.notify_search_summary(results=search_summary)
 
         if not all_vod_files:
             print("No recordings found in the specified date range")

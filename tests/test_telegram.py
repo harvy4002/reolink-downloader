@@ -65,6 +65,23 @@ class TestSendsWhenEnabled:
         assert kwargs["data"]["chat_id"] == "999"
         assert "3/4" in kwargs["data"]["text"]
 
+    async def test_search_summary_is_a_single_grouped_message(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "abc123")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "999")
+        notifier = TelegramNotifier()
+        session, session_cm = self._mock_session()
+
+        with patch("aiohttp.ClientSession", return_value=session_cm):
+            await notifier.notify_search_summary(
+                results=[(0, "Front Door", 5), (1, "Backyard", 0), (2, "Garage", -1)]
+            )
+
+        session.post.assert_called_once()  # one message for all 3 channels
+        text = session.post.call_args.kwargs["data"]["text"]
+        assert "ch0 (Front Door): 5 found" in text
+        assert "ch1 (Backyard): 0 found" in text
+        assert "ch2 (Garage): search failed" in text
+
     async def test_non_200_response_does_not_raise(self, monkeypatch, capsys):
         monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "abc123")
         monkeypatch.setenv("TELEGRAM_CHAT_ID", "999")

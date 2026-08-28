@@ -69,13 +69,21 @@ async def test_multi_channel_search_and_download(tmp_path, monkeypatch):
     [tele_call] = [(c, n) for c, n in fake_bc_cls.calls if "tele" in n]
     assert tele_call == (2, "20240115_030000_telephoto_ch1_tele_a")
 
-    # Telegram: start, per-channel search/download progress, one error, an
-    # overall-progress update, and a final summary were all recorded.
+    # Telegram: start, one error, an overall-progress update, and a final
+    # summary were all recorded.
     joined = "\n".join(notifier.messages)
     assert "starting run" in joined
     assert "failed to download" in joined
     assert "Overall progress" in joined
     assert "finished run" in joined
+
+    # Search results across all 3 channels are grouped into a single
+    # message, not one message per channel.
+    search_messages = [m for m in notifier.messages if "Search complete" in m]
+    assert len(search_messages) == 1
+    assert "ch0 (Front Door): 2 found" in search_messages[0]
+    assert "ch1 (Backyard): 2 found" in search_messages[0]
+    assert "ch2 (Garage): 0 found" in search_messages[0]
 
 
 async def test_invalid_channel_returns_without_raising(tmp_path, monkeypatch, capsys):

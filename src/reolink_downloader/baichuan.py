@@ -37,6 +37,13 @@ DEFAULT_PORT = 9000
 AES_IV = b"0123456789abcdef"
 XML_KEY = (0x1F, 0x2D, 0x3C, 0x4B, 0x5A, 0x69, 0x78, 0xFF)
 
+# The camera closing the TCP connection is handled gracefully (see download()'s
+# except clause below); these bound how long we'll wait for it to say anything
+# at all, e.g. if it silently stops responding under load (several concurrent
+# download sessions can apparently exceed what some NVRs handle cleanly).
+CONNECT_TIMEOUT_SECONDS = 15.0
+READ_TIMEOUT_SECONDS = 30.0
+
 # A request/response correlation id we put in the download request; the camera
 # echoes it on every media message. The value is arbitrary.
 MEDIA_MESS_ID = 54
@@ -214,7 +221,14 @@ class BaichuanDownloader:
         await self.close()
 
     async def connect(self) -> None:
-        self._reader, self._writer = await asyncio.open_connection(self.host, self.port)
+        try:
+            self._reader, self._writer = await asyncio.wait_for(
+                asyncio.open_connection(self.host, self.port), timeout=CONNECT_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as e:
+            raise BaichuanError(
+                f"could not connect to {self.host}:{self.port} within {CONNECT_TIMEOUT_SECONDS:.0f}s"
+            ) from e
 
     async def close(self) -> None:
         if self._writer is not None:
@@ -249,6 +263,16 @@ class BaichuanDownloader:
         await self._writer.drain()
 
     async def _read_message(self) -> tuple[int, int, int, str, int, bytes]:
+        """Read one full BC message, bounded by READ_TIMEOUT_SECONDS of camera
+        silence. Without this, a stalled connection (e.g. the NVR not
+        responding to one of several simultaneous download requests) hangs
+        forever instead of raising something auto-recovery can retry."""
+        try:
+            return await asyncio.wait_for(self._read_message_raw(), timeout=READ_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as e:
+            raise BaichuanError(f"no response from camera for {READ_TIMEOUT_SECONDS:.0f}s") from e
+
+    async def _read_message_raw(self) -> tuple[int, int, int, str, int, bytes]:
         """Read one full BC message: (cmd_id, mess_id, status, class, poff, body)."""
         assert self._reader is not None
         header = await self._reader.readexactly(20)

@@ -50,6 +50,11 @@ states that PoE NVRs support at most **4 concurrent playback streams**; going ab
 that risks connection errors or starving live view/other clients. Drop to `1` for
 fully sequential downloads, or raise it only if your NVR clearly handles more.
 
+If downloads seem to hang with no progress output at all (even the throttled ~3s
+ticks), your NVR likely can't cleanly handle that many simultaneous binary download
+sessions even though it accepted the connections/logins fine — try lowering
+`--concurrency` (`REOLINK_CONCURRENCY`) to `1` and see if that resolves it.
+
 ## Progress logging
 
 Each download logs its own progress at roughly every 20% of the on-camera file size
@@ -103,7 +108,10 @@ visibility without watching logs.
 
 Overall job progress is sent to Telegram at most once per 25% step (plus a final
 message when the job completes), rather than on every file, so a large job doesn't
-flood the chat.
+flood the chat. Search results across all channels are likewise sent as a single
+combined message once every channel's search finishes, rather than one message per
+channel — only genuinely realtime events (progress updates, per-file errors) get their
+own message as they happen.
 
 ## Installation
 
