@@ -197,10 +197,10 @@ found recordings are already on disk from a previous run — e.g. `ch0 (Front Do
 found (5 already downloaded, 7 new)` — so resuming an interrupted run is visible right
 from the start, not just in the final summary.
 
-On top of those milestone-based updates, a separate heartbeat message is sent once an
-hour on a timer regardless of how many files have completed since the last one — useful
-for confirming a long-running job (thousands of files can take many hours) is still
-alive rather than silently stalled. This is a fixed interval
+On top of those milestone-based updates, a separate heartbeat message is sent every 30
+minutes on a timer regardless of how many files have completed since the last one —
+useful for confirming a long-running job (thousands of files can take many hours) is
+still alive rather than silently stalled. This is a fixed interval
 (`PROGRESS_HEARTBEAT_INTERVAL_SECONDS` in `src/reolink_downloader/__init__.py`), not
 currently a CLI flag/env var.
 

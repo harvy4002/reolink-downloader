@@ -44,7 +44,7 @@ RETRY_DELAY_SECONDS = 2.0
 # How often to push a Telegram progress update purely on a timer, independent
 # of file-completion events — useful for confirming a long run is still
 # alive (not silently stalled) without watching logs.
-PROGRESS_HEARTBEAT_INTERVAL_SECONDS = 3600
+PROGRESS_HEARTBEAT_INTERVAL_SECONDS = 1800
 
 
 @dataclass
