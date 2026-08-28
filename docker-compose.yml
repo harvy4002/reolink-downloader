@@ -1,0 +1,14 @@
+services:
+  reolink-downloader:
+    build: .
+    image: reolink-downloader:latest
+    env_file:
+      - .env
+    volumes:
+      - ./downloads:/downloads
+    # One-off job: downloads everything in the configured date range, then
+    # exits. Don't restart it automatically — re-run manually each time you
+    # want a new batch (`docker compose up` or `docker compose run --rm
+    # reolink-downloader`). On Synology's Container Manager, make sure the
+    # project's "auto-restart" setting is off for the same reason.
+    restart: "no"

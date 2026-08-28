@@ -7,6 +7,7 @@ specified date range.
 
 import argparse
 import asyncio
+import os
 import re
 import sys
 import time
@@ -518,11 +519,30 @@ def parse_channel_spec(spec: str) -> "str | set[int]":
     return channels
 
 
+def _env_bool(name: str) -> bool:
+    """Parse a boolean-flag environment variable (e.g. REOLINK_DEBUG)."""
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env(name: str, default: str | None = None) -> str | None:
+    """Read an environment variable, treating an unset OR blank value as
+    "not provided" — Docker .env files commonly list every key with an
+    empty placeholder, which should fall through to `default` rather than
+    e.g. crashing an int-typed argument on int('')."""
+    value = os.environ.get(name)
+    return value if value else default
+
+
 def main():
     """Main entry point for the CLI application."""
     parser = argparse.ArgumentParser(
         description="Download videos from a Reolink NVR/camera within a specified date range",
         epilog=(
+            "Every option below can also be set via an environment variable (useful for "
+            "Docker/unattended use) — a CLI flag always overrides its environment variable: "
+            "REOLINK_IP, REOLINK_USERNAME, REOLINK_PASSWORD, REOLINK_START_TIME, "
+            "REOLINK_END_TIME, REOLINK_OUTPUT, REOLINK_CHANNEL, REOLINK_CONCURRENCY, "
+            "REOLINK_LENS, REOLINK_LIMIT, REOLINK_DEBUG.\n\n"
             "Telegram notifications (optional): set the TELEGRAM_BOT_TOKEN and "
             "TELEGRAM_CHAT_ID environment variables to receive run start/finish, "
             "per-channel progress, and per-file error notifications. Both must be "
@@ -532,75 +552,105 @@ def main():
 
     parser.add_argument(
         "--ip",
-        required=True,
-        help="Camera IP address or hostname",
+        default=_env("REOLINK_IP"),
+        help="Camera IP address or hostname (env: REOLINK_IP)",
     )
     parser.add_argument(
         "--username",
-        required=True,
-        help="Camera username",
+        default=_env("REOLINK_USERNAME"),
+        help="Camera username (env: REOLINK_USERNAME)",
     )
     parser.add_argument(
         "--password",
-        required=True,
-        help="Camera password",
+        default=_env("REOLINK_PASSWORD"),
+        help="Camera password (env: REOLINK_PASSWORD)",
     )
     parser.add_argument(
         "--start-time",
-        required=True,
-        help="Start date/time (e.g., '2024-01-01' or '2024-01-01 14:30:00')",
+        default=_env("REOLINK_START_TIME"),
+        help="Start date/time (e.g., '2024-01-01' or '2024-01-01 14:30:00') (env: REOLINK_START_TIME)",
     )
     parser.add_argument(
         "--end-time",
-        required=True,
-        help="End date/time (e.g., '2024-01-02' or '2024-01-02 14:30:00')",
+        default=_env("REOLINK_END_TIME"),
+        help="End date/time (e.g., '2024-01-02' or '2024-01-02 14:30:00') (env: REOLINK_END_TIME)",
     )
     parser.add_argument(
         "--output",
-        default="./downloads",
-        help="Output directory for downloaded videos (default: ./downloads)",
+        default=_env("REOLINK_OUTPUT", "./downloads"),
+        help="Output directory for downloaded videos (default: ./downloads) (env: REOLINK_OUTPUT)",
     )
     parser.add_argument(
         "--channel",
-        default="all",
+        default=_env("REOLINK_CHANNEL", "all"),
         help=(
             "NVR channel(s) to download, e.g. '0', '0,2,5', '0-3', or '0,2-4,7'. "
-            "Default 'all' auto-detects and downloads every channel the device reports."
+            "Default 'all' auto-detects and downloads every channel the device reports. "
+            "(env: REOLINK_CHANNEL)"
         ),
     )
     parser.add_argument(
         "--concurrency",
         type=int,
-        default=3,
+        default=_env("REOLINK_CONCURRENCY", "3"),
         help=(
             "Number of concurrent Baichuan download connections (default: 3). "
             "Reolink PoE NVRs support at most 4 concurrent playback streams; going higher "
-            "risks contending with live viewing or other clients."
+            "risks contending with live viewing or other clients. (env: REOLINK_CONCURRENCY)"
         ),
     )
     parser.add_argument(
         "--lens",
         choices=["wide", "telephoto", "both"],
-        default="both",
+        default=_env("REOLINK_LENS", "both"),
         help=(
             "Which lens to download on channels/cameras with a second (telephoto) lens, "
             "such as the TrackMix PoE (default: both). Automatically narrowed to 'wide' "
-            "on channels without a telephoto lens."
+            "on channels without a telephoto lens. (env: REOLINK_LENS)"
         ),
     )
     parser.add_argument(
         "--limit",
         type=int,
-        default=None,
-        help="Only download the first N recordings found across all selected channels (useful for testing)",
+        default=_env("REOLINK_LIMIT"),
+        help=(
+            "Only download the first N recordings found across all selected channels "
+            "(useful for testing) (env: REOLINK_LIMIT)"
+        ),
     )
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Print the raw Baichuan protocol exchange (for diagnosing downloads)",
+        default=_env_bool("REOLINK_DEBUG"),
+        help="Print the raw Baichuan protocol exchange (for diagnosing downloads) (env: REOLINK_DEBUG)",
     )
 
     args = parser.parse_args()
+
+    # Unlike CLI-provided values, argparse defaults sourced from env vars
+    # aren't validated against `required`/`choices` — check both here.
+    missing = [
+        flag
+        for flag, value in (
+            ("--ip", args.ip),
+            ("--username", args.username),
+            ("--password", args.password),
+            ("--start-time", args.start_time),
+            ("--end-time", args.end_time),
+        )
+        if not value
+    ]
+    if missing:
+        print(
+            f"Error: missing required option(s): {', '.join(missing)} "
+            "(set via the CLI flag or the matching REOLINK_* environment variable)",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if args.lens not in ("wide", "telephoto", "both"):
+        print(f"Error: invalid --lens '{args.lens}' (choose from wide, telephoto, both)", file=sys.stderr)
+        sys.exit(1)
 
     # Expand the lens choice into the concrete list of lenses to download.
     lenses = ["wide", "telephoto"] if args.lens == "both" else [args.lens]

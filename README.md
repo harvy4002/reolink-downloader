@@ -93,14 +93,55 @@ flood the chat.
 uv tool install git+https://github.com/deviantintegral/reolink-downloader
 ```
 
+## Configuration via environment variables
+
+Every CLI option also has a matching environment variable, so it drops straight into
+Docker/unattended use without secrets on the command line. A CLI flag always overrides
+its environment variable if both are set.
+
+| Flag              | Environment variable   |
+| ----------------- | ----------------------- |
+| `--ip`             | `REOLINK_IP`             |
+| `--username`       | `REOLINK_USERNAME`       |
+| `--password`       | `REOLINK_PASSWORD`       |
+| `--start-time`     | `REOLINK_START_TIME`     |
+| `--end-time`       | `REOLINK_END_TIME`       |
+| `--output`         | `REOLINK_OUTPUT`         |
+| `--channel`        | `REOLINK_CHANNEL`        |
+| `--concurrency`    | `REOLINK_CONCURRENCY`    |
+| `--lens`           | `REOLINK_LENS`           |
+| `--limit`          | `REOLINK_LIMIT`          |
+| `--debug`          | `REOLINK_DEBUG` (`true`/`1`/`yes`/`on`) |
+
+`--ip`, `--username`, `--password`, `--start-time`, and `--end-time` are the only
+required options — set each one via its flag or its environment variable.
+
+## Docker
+
+See [`docker-compose.yml`](docker-compose.yml) for a ready-to-use Compose file (works on
+Synology's Container Manager too) and [`.env.example`](.env.example) for the settings it
+reads. This is a one-off job, not a long-running service: the container starts, downloads
+everything in the configured date range, and exits.
+
+```
+cp .env.example .env    # fill in your camera details and date range
+docker compose up       # or: docker compose run --rm reolink-downloader
+```
+
+On Synology, upload the project (or just `docker-compose.yml`/`.env`/`Dockerfile`) to a
+shared folder, then open **Container Manager → Project → Create** and point it at that
+folder — Container Manager understands `docker-compose.yml` directly. Downloaded videos
+land in the `./downloads` folder next to the compose file (bind-mounted into the
+container), so they survive after the container exits.
+
 ## Usage
 
 ```
 $ uv tool run reolink-downloader --help
-usage: reolink-downloader [-h] --ip IP --username USERNAME --password PASSWORD
-                          --start-time START_TIME --end-time END_TIME
-                          [--output OUTPUT] [--channel CHANNEL]
-                          [--concurrency CONCURRENCY]
+usage: reolink-downloader [-h] [--ip IP] [--username USERNAME]
+                          [--password PASSWORD] [--start-time START_TIME]
+                          [--end-time END_TIME] [--output OUTPUT]
+                          [--channel CHANNEL] [--concurrency CONCURRENCY]
                           [--lens {wide,telephoto,both}] [--limit LIMIT]
                           [--debug]
 
@@ -108,36 +149,44 @@ Download videos from a Reolink NVR/camera within a specified date range
 
 options:
   -h, --help            show this help message and exit
-  --ip IP               Camera IP address or hostname
-  --username USERNAME   Camera username
-  --password PASSWORD   Camera password
+  --ip IP               Camera IP address or hostname (env: REOLINK_IP)
+  --username USERNAME   Camera username (env: REOLINK_USERNAME)
+  --password PASSWORD   Camera password (env: REOLINK_PASSWORD)
   --start-time START_TIME
                         Start date/time (e.g., '2024-01-01' or '2024-01-01
-                        14:30:00')
+                        14:30:00') (env: REOLINK_START_TIME)
   --end-time END_TIME   End date/time (e.g., '2024-01-02' or '2024-01-02
-                        14:30:00')
+                        14:30:00') (env: REOLINK_END_TIME)
   --output OUTPUT       Output directory for downloaded videos (default:
-                        ./downloads)
+                        ./downloads) (env: REOLINK_OUTPUT)
   --channel CHANNEL     NVR channel(s) to download, e.g. '0', '0,2,5', '0-3',
                         or '0,2-4,7'. Default 'all' auto-detects and downloads
-                        every channel the device reports.
+                        every channel the device reports. (env:
+                        REOLINK_CHANNEL)
   --concurrency CONCURRENCY
                         Number of concurrent Baichuan download connections
-                        (default: 1, sequential). Reolink PoE NVRs support at
-                        most 4 concurrent playback streams; going higher risks
-                        contending with live viewing or other clients.
+                        (default: 3). Reolink PoE NVRs support at most 4
+                        concurrent playback streams; going higher risks
+                        contending with live viewing or other clients. (env:
+                        REOLINK_CONCURRENCY)
   --lens {wide,telephoto,both}
                         Which lens to download on channels/cameras with a
                         second (telephoto) lens, such as the TrackMix PoE
                         (default: both). Automatically narrowed to 'wide' on
-                        channels without a telephoto lens.
+                        channels without a telephoto lens. (env: REOLINK_LENS)
   --limit LIMIT         Only download the first N recordings found across all
-                        selected channels (useful for testing)
+                        selected channels (useful for testing) (env:
+                        REOLINK_LIMIT)
   --debug               Print the raw Baichuan protocol exchange (for
-                        diagnosing downloads)
+                        diagnosing downloads) (env: REOLINK_DEBUG)
 
-Telegram notifications (optional): set the TELEGRAM_BOT_TOKEN and
-TELEGRAM_CHAT_ID environment variables to receive run start/finish, per-
-channel progress, and per-file error notifications. Both must be set for
-notifications to be sent; otherwise they're silently skipped.
+Every option above can also be set via an environment variable (useful for
+Docker/unattended use) — a CLI flag always overrides its environment
+variable: REOLINK_IP, REOLINK_USERNAME, REOLINK_PASSWORD, REOLINK_START_TIME,
+REOLINK_END_TIME, REOLINK_OUTPUT, REOLINK_CHANNEL, REOLINK_CONCURRENCY,
+REOLINK_LENS, REOLINK_LIMIT, REOLINK_DEBUG. Telegram notifications
+(optional): set the TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment
+variables to receive run start/finish, per-channel progress, and per-file
+error notifications. Both must be set for notifications to be sent;
+otherwise they're silently skipped.
 ```

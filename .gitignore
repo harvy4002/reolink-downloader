@@ -11,3 +11,6 @@ wheels/
 
 # Default directory for camera downloads.
 downloads/
+
+# Docker env file — holds the camera password and Telegram bot token.
+.env
