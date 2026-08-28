@@ -998,10 +998,10 @@ def main():
         default=_env("REOLINK_MAX_DOWNLOAD_MB"),
         help=(
             "Skip (not retry) a single recording once it exceeds this many MB, instead of "
-            "downloading it in full. A recording far larger than a typical short clip can use "
-            "well over 2x its size in memory while processing, which risks an out-of-memory "
-            "crash on a memory-constrained device; skipping it keeps the rest of the run going. "
-            "Unset by default (no cap). (env: REOLINK_MAX_DOWNLOAD_MB)"
+            "downloading it in full. A recording far larger than a typical short clip usually "
+            "means a 'file' covers far more time than expected; skipping it avoids spending a "
+            "lot of time/bandwidth/disk on an unexpectedly huge recording and keeps the rest of "
+            "the run going. Unset by default (no cap). (env: REOLINK_MAX_DOWNLOAD_MB)"
         ),
     )
     parser.add_argument(

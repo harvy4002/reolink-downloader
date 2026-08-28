@@ -127,15 +127,15 @@ while this is happening, so it isn't silent.
 
 ### Memory usage on constrained devices (e.g. a Synology NAS)
 
-A recording is fully buffered in memory while it downloads, then deframed into a raw
-Annex-B stream before being written to disk. For a typical short motion clip this is a
-non-issue, but a much longer continuous/timer recording reported as a single "file" can
-mean hundreds of MB (or more) held in memory at once — and with `--concurrency` > 1,
-that's per concurrent download. A single recording collecting more than ~150 MB prints a
+A recording is deframed and streamed to disk as it downloads, rather than buffered whole
+in memory: only a small, bounded prefix of decoded video (a few KB, just enough to detect
+h264 vs h265) is ever held back before the output file is opened and the rest is written
+straight through. Peak memory per download stays roughly constant regardless of how large
+a single recording turns out to be, so a much longer continuous/timer recording reported
+as a single "file" no longer means hundreds of MB (or more) held in memory at once — even
+with `--concurrency` > 1. A single recording collecting more than ~150 MB still prints a
 console warning, since that usually means a "file" covers far more time than a typical
-short clip — worth checking whether that's expected for your recording schedule. The
-deframing step itself reuses the same buffer rather than making extra full copies of it,
-to keep the peak memory overhead as low as it reasonably can be.
+short clip — worth checking whether that's expected for your recording schedule.
 
 If you've actually hit an out-of-memory crash (the container just dies, no application
 error logged — that's what an OOM kill looks like), set `--max-download-mb`
@@ -402,12 +402,12 @@ options:
   --max-download-mb MAX_DOWNLOAD_MB
                         Skip (not retry) a single recording once it exceeds
                         this many MB, instead of downloading it in full. A
-                        recording far larger than a typical short clip can use
-                        well over 2x its size in memory while processing,
-                        which risks an out-of-memory crash on a memory-
-                        constrained device; skipping it keeps the rest of the
-                        run going. Unset by default (no cap). (env:
-                        REOLINK_MAX_DOWNLOAD_MB)
+                        recording far larger than a typical short clip usually
+                        means a 'file' covers far more time than expected;
+                        skipping it avoids spending a lot of
+                        time/bandwidth/disk on an unexpectedly huge recording
+                        and keeps the rest of the run going. Unset by default
+                        (no cap). (env: REOLINK_MAX_DOWNLOAD_MB)
   --debug               Print the raw Baichuan protocol exchange (for
                         diagnosing downloads) (env: REOLINK_DEBUG)
 

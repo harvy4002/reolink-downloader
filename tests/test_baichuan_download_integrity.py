@@ -68,10 +68,10 @@ async def test_successful_download_writes_final_file_with_no_leftover_tmp(monkey
 async def test_crash_mid_write_never_leaves_a_file_at_the_final_path(monkeypatch, tmp_path):
     downloader = _make_downloader(monkeypatch, _fake_media_responses())
 
-    def crashing_write_bytes(self, data):
+    def crashing_open(self, mode="r"):
         raise OSError("simulated kill mid-write")
 
-    monkeypatch.setattr(Path, "write_bytes", crashing_write_bytes)
+    monkeypatch.setattr(Path, "open", crashing_open)
 
     out_path = tmp_path / "clip"
     with pytest.raises(OSError, match="simulated kill mid-write"):

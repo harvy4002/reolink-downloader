@@ -73,6 +73,13 @@ LARGE_DOWNLOAD_WARNING_BYTES = 150_000_000
 # to demand an exact match.
 MIN_RECEIVED_SIZE_RATIO = 0.5
 
+# sniff_codec() only needs to see the first NAL unit or two in practice (a
+# keyframe starts with SPS/PPS), so download() buffers just this much
+# deframed video before detecting the codec and opening the output file —
+# not the whole recording — to keep peak memory bounded regardless of how
+# large the recording turns out to be.
+CODEC_SNIFF_PREFIX_BYTES = 4096
+
 # A request/response correlation id we put in the download request; the camera
 # echoes it on every media message. The value is arbitrary.
 MEDIA_MESS_ID = 54
@@ -183,39 +190,60 @@ def _pad8(n: int) -> int:
     return (8 - n % 8) % 8
 
 
-def deframe_video(stream: bytes | bytearray) -> tuple[bytearray, dict | None]:
-    """Parse a BCMEDIA byte stream; return (annex_b_video, info_dict)."""
-    vbuf = bytearray()
-    info: dict | None = None
-    p, n = 0, len(stream)
-    while p + 8 <= n:
-        magic = _u32(stream[p : p + 4])
-        if magic in (_M_INFO_V1, _M_INFO_V2):
-            hs = _u32(stream[p + 4 : p + 8])
-            info = {
-                "width": _u32(stream[p + 8 : p + 12]),
-                "height": _u32(stream[p + 12 : p + 16]),
-                "fps": stream[p + 17],
-            }
-            p += hs  # header_size is the total info-frame size, incl. magic
-        elif _M_IFRAME <= magic <= _M_PFRAME_LAST:
-            payload_size = _u32(stream[p + 8 : p + 12])
-            add_hdr = _u32(stream[p + 12 : p + 16])
-            start = p + 24 + add_hdr
-            data = stream[start : start + payload_size]
-            if len(data) < payload_size:
-                break  # truncated; wait for more data
-            vbuf += data
-            p = start + payload_size + _pad8(payload_size)
-        elif magic in (_M_AAC, _M_ADPCM):
-            payload_size = struct.unpack("<H", stream[p + 4 : p + 6])[0]
-            start = p + 8
-            if start + payload_size > n:
-                break
-            p = start + payload_size + _pad8(payload_size)
-        else:
-            break  # unknown magic: stop (caller decides how much was consumed)
-    return vbuf, info
+class _StreamingDeframer:
+    """Incrementally parses a BCMEDIA byte stream fed in arbitrary chunks.
+
+    Each ``feed(chunk)`` call returns whatever Annex-B video bytes could be
+    fully decoded from the data seen so far, and internally keeps only the
+    tail end of a not-yet-complete frame (never the whole recording) between
+    calls — this is what lets download() write video to disk as it arrives
+    instead of buffering the entire clip in memory first.
+    """
+
+    def __init__(self) -> None:
+        self._buf = bytearray()
+        self.info: dict | None = None
+
+    def feed(self, chunk: bytes) -> bytearray:
+        self._buf += chunk
+        buf = self._buf
+        out = bytearray()
+        p, n = 0, len(buf)
+        while p + 8 <= n:
+            magic = _u32(buf[p : p + 4])
+            if magic in (_M_INFO_V1, _M_INFO_V2):
+                hs = _u32(buf[p + 4 : p + 8])
+                if p + 18 > n or p + hs > n:
+                    break  # info frame not fully arrived yet; wait for more data
+                self.info = {
+                    "width": _u32(buf[p + 8 : p + 12]),
+                    "height": _u32(buf[p + 12 : p + 16]),
+                    "fps": buf[p + 17],
+                }
+                p += hs  # header_size is the total info-frame size, incl. magic
+            elif _M_IFRAME <= magic <= _M_PFRAME_LAST:
+                if p + 16 > n:
+                    break
+                payload_size = _u32(buf[p + 8 : p + 12])
+                add_hdr = _u32(buf[p + 12 : p + 16])
+                start = p + 24 + add_hdr
+                end = start + payload_size
+                if end > n:
+                    break  # truncated; wait for more data
+                out += buf[start:end]
+                p = end + _pad8(payload_size)
+            elif magic in (_M_AAC, _M_ADPCM):
+                if p + 6 > n:
+                    break
+                payload_size = struct.unpack("<H", buf[p + 4 : p + 6])[0]
+                start = p + 8
+                if start + payload_size > n:
+                    break
+                p = start + payload_size + _pad8(payload_size)
+            else:
+                break  # unknown magic: stop (caller decides how much was consumed)
+        del buf[:p]  # drop everything consumed; keep only the incomplete tail
+        return out
 
 
 @dataclass
@@ -408,100 +436,134 @@ class BaichuanDownloader:
                   f"bitmap={logic_bitmap} {start} - {end}")
         await self._send(143, req, mess_id=MEDIA_MESS_ID, message_class="1464", aes=True)
 
-        media = bytearray()
+        # The recording is deframed and written to disk incrementally as it
+        # arrives (see _StreamingDeframer) rather than buffered whole in
+        # memory: only a small bounded prefix (CODEC_SNIFF_PREFIX_BYTES) is
+        # ever held back, just long enough to sniff h264 vs h265, before the
+        # output file is opened and the rest is streamed straight through.
+        # This keeps peak memory roughly constant regardless of how large a
+        # single recording turns out to be, which matters a lot on a
+        # memory-constrained NAS.
+        deframer = _StreamingDeframer()
+        bytes_received = 0
+        video_bytes_seen = 0
         nmsg = 0
         discarded = 0
         last_progress_at = time.monotonic()
         last_waiting_notice_at = 0.0
-        while True:
-            if time.monotonic() - last_progress_at > NO_PROGRESS_TIMEOUT_SECONDS:
-                raise BaichuanError(
-                    f"no download progress for {NO_PROGRESS_TIMEOUT_SECONDS:.0f}s despite "
-                    f"ongoing traffic ({discarded} unrelated message(s) received, {nmsg} media "
-                    f"message(s) so far) — likely stuck behind unrelated camera event/alarm traffic"
-                )
-            try:
-                cmd_id, mess_id, status, mclass, poff, body = await self._read_message()
-            except (asyncio.IncompleteReadError, ConnectionError) as e:
-                self._dbg(f"stream closed after {nmsg} media msgs ({type(e).__name__})")
-                break  # camera closed the stream; decode what we have
-            if cmd_id != 143:
-                # Surface any error/control reply (e.g. status 400) for debugging.
-                if self.debug and (status not in (0, 200) or body):
-                    self._dbg(f"recv cmd={cmd_id} status={status} class={mclass} "
-                              f"len={len(body)} :: {self._decrypt_control(body, mess_id, poff)[:200]}")
-                discarded += 1
-                now = time.monotonic()
-                if not self.debug and now - last_waiting_notice_at > WAITING_NOTICE_INTERVAL_SECONDS:
-                    last_waiting_notice_at = now
-                    print(f"  Still waiting for media data ({discarded} unrelated message(s) from camera so far)...")
-                continue
-            if not body:
-                self._dbg(f"end-of-stream marker (cmd143 len=0) after {nmsg} media msgs")
-                break  # zero-length cmd 143 marks end of stream
-            if poff == 0:
-                # An AES-encrypted XML control message (status/info), not media.
-                if self.debug:
-                    self._dbg(f"control cmd143 len={len(body)} :: "
-                              f"{self._decrypt_control(body, mess_id, 0)[:120]}")
-                continue
-            chunk = self._decrypt_media_body(body, poff)
-            if nmsg == 0:
-                self._dbg(f"first media chunk: poff={poff} len={len(body)} "
-                          f"decoded_head={chunk[:8].hex()}")
-            media += chunk
-            nmsg += 1
-            last_progress_at = time.monotonic()
-            if max_bytes is not None and len(media) > max_bytes:
-                raise BaichuanFileTooLargeError(
-                    f"recording exceeded the {max_bytes / 1_000_000:.0f} MB max-download-size "
-                    f"limit ({len(media) / 1_000_000:.0f} MB collected so far, {nmsg} media "
-                    f"messages) — aborting to avoid excessive memory use"
-                )
-            if on_progress is not None:
+
+        codec: str | None = None
+        raw_path: Path | None = None
+        tmp_path: Path | None = None
+        out_file = None
+        prefix = bytearray()
+
+        def start_writing(sniff_buf: bytes | bytearray) -> None:
+            nonlocal codec, raw_path, tmp_path, out_file
+            codec = sniff_codec(sniff_buf)
+            raw_path = out_path.with_suffix(f".{codec}")
+            # Write to a temp file and atomically rename into place, rather
+            # than writing straight to raw_path. The resumability check in
+            # __init__.py only checks whether the final .h264/.h265 file
+            # *exists*, not whether it's complete -- if the process were
+            # killed mid-write (a real risk on a memory-constrained device),
+            # writing directly to raw_path could leave a truncated file that
+            # gets silently treated as "already downloaded" forever. A crash
+            # here now leaves either the complete final file, or a harmless
+            # `.part` file that resumability doesn't recognize, so the
+            # recording just gets retried fresh on the next run.
+            tmp_path = raw_path.with_name(raw_path.name + ".part")
+            out_file = tmp_path.open("wb")
+            out_file.write(sniff_buf)
+
+        try:
+            while True:
+                if time.monotonic() - last_progress_at > NO_PROGRESS_TIMEOUT_SECONDS:
+                    raise BaichuanError(
+                        f"no download progress for {NO_PROGRESS_TIMEOUT_SECONDS:.0f}s despite "
+                        f"ongoing traffic ({discarded} unrelated message(s) received, {nmsg} media "
+                        f"message(s) so far) — likely stuck behind unrelated camera event/alarm traffic"
+                    )
                 try:
-                    on_progress(len(media), total_size)
-                except Exception:
-                    pass
-        self._dbg(f"collected {len(media)} media bytes from {nmsg} media messages")
-        if len(media) > LARGE_DOWNLOAD_WARNING_BYTES:
-            print(
-                f"  Warning: this recording is unusually large ({len(media) / 1_000_000:.0f} MB) — "
-                "if this keeps happening on a memory-constrained device, it may be worth checking "
-                "why a single clip covers this much time (see README's clip-count discrepancy notes)."
-            )
-        if total_size and len(media) < total_size * MIN_RECEIVED_SIZE_RATIO:
-            raise BaichuanError(
-                f"received only {len(media)} bytes but the camera reports this recording as "
-                f"~{total_size} bytes ({len(media) / total_size:.0%}) — likely an incomplete "
-                f"download despite a clean end-of-stream signal"
-            )
+                    cmd_id, mess_id, status, mclass, poff, body = await self._read_message()
+                except (asyncio.IncompleteReadError, ConnectionError) as e:
+                    self._dbg(f"stream closed after {nmsg} media msgs ({type(e).__name__})")
+                    break  # camera closed the stream; decode what we have
+                if cmd_id != 143:
+                    # Surface any error/control reply (e.g. status 400) for debugging.
+                    if self.debug and (status not in (0, 200) or body):
+                        self._dbg(f"recv cmd={cmd_id} status={status} class={mclass} "
+                                  f"len={len(body)} :: {self._decrypt_control(body, mess_id, poff)[:200]}")
+                    discarded += 1
+                    now = time.monotonic()
+                    if not self.debug and now - last_waiting_notice_at > WAITING_NOTICE_INTERVAL_SECONDS:
+                        last_waiting_notice_at = now
+                        print(f"  Still waiting for media data ({discarded} unrelated message(s) from camera so far)...")
+                    continue
+                if not body:
+                    self._dbg(f"end-of-stream marker (cmd143 len=0) after {nmsg} media msgs")
+                    break  # zero-length cmd 143 marks end of stream
+                if poff == 0:
+                    # An AES-encrypted XML control message (status/info), not media.
+                    if self.debug:
+                        self._dbg(f"control cmd143 len={len(body)} :: "
+                                  f"{self._decrypt_control(body, mess_id, 0)[:120]}")
+                    continue
+                chunk = self._decrypt_media_body(body, poff)
+                if nmsg == 0:
+                    self._dbg(f"first media chunk: poff={poff} len={len(body)} "
+                              f"decoded_head={chunk[:8].hex()}")
+                bytes_received += len(chunk)
+                nmsg += 1
+                last_progress_at = time.monotonic()
+                if max_bytes is not None and bytes_received > max_bytes:
+                    raise BaichuanFileTooLargeError(
+                        f"recording exceeded the {max_bytes / 1_000_000:.0f} MB max-download-size "
+                        f"limit ({bytes_received / 1_000_000:.0f} MB collected so far, {nmsg} media "
+                        f"messages) — aborting to avoid excessive memory use"
+                    )
 
-        # deframe_video/sniff_codec only ever slice their input, so pass the
-        # bytearray we already have directly rather than copying it into a
-        # new `bytes` object first — for a large recording (hundreds of MB+)
-        # those copies could transiently need well over 2x the memory of the
-        # recording itself, which is enough to trigger an OOM kill on a
-        # memory-constrained NAS.
-        video, info = deframe_video(media)
-        if not video:
-            raise BaichuanError("no video frames decoded (wrong time range or password?)")
+                new_video = deframer.feed(chunk)
+                if new_video:
+                    video_bytes_seen += len(new_video)
+                    if codec is None:
+                        prefix += new_video
+                        if len(prefix) >= CODEC_SNIFF_PREFIX_BYTES:
+                            start_writing(prefix)
+                            prefix = bytearray()
+                    else:
+                        out_file.write(new_video)
 
-        codec = sniff_codec(video)
-        self._dbg(f"decoded {codec} {info} video_bytes={len(video)}")
-        raw_path = out_path.with_suffix(f".{codec}")
-        # Write to a temp file and atomically rename into place, rather than
-        # writing straight to raw_path. The resumability check in
-        # __init__.py only checks whether the final .h264/.h265 file
-        # *exists*, not whether it's complete -- if the process were killed
-        # mid-write (a real risk on a memory-constrained device), writing
-        # directly to raw_path could leave a truncated file that gets
-        # silently treated as "already downloaded" forever. A crash here now
-        # leaves either the complete final file, or a harmless `.part` file
-        # that resumability doesn't recognize, so the recording just gets
-        # retried fresh on the next run.
-        tmp_path = raw_path.with_name(raw_path.name + ".part")
-        tmp_path.write_bytes(video)
+                if on_progress is not None:
+                    try:
+                        on_progress(bytes_received, total_size)
+                    except Exception:
+                        pass
+
+            self._dbg(f"collected {bytes_received} media bytes from {nmsg} media messages")
+            if bytes_received > LARGE_DOWNLOAD_WARNING_BYTES:
+                print(
+                    f"  Warning: this recording is unusually large ({bytes_received / 1_000_000:.0f} MB) — "
+                    "if this keeps happening on a memory-constrained device, it may be worth checking "
+                    "why a single clip covers this much time (see README's clip-count discrepancy notes)."
+                )
+            if total_size and bytes_received < total_size * MIN_RECEIVED_SIZE_RATIO:
+                raise BaichuanError(
+                    f"received only {bytes_received} bytes but the camera reports this recording as "
+                    f"~{total_size} bytes ({bytes_received / total_size:.0%}) — likely an incomplete "
+                    f"download despite a clean end-of-stream signal"
+                )
+
+            if codec is None:
+                if not prefix:
+                    raise BaichuanError("no video frames decoded (wrong time range or password?)")
+                start_writing(prefix)
+
+            self._dbg(f"decoded {codec} {deframer.info} video_bytes={video_bytes_seen}")
+        finally:
+            if out_file is not None:
+                out_file.close()
+
         tmp_path.replace(raw_path)
         return raw_path
 
