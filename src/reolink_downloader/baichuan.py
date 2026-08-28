@@ -457,6 +457,7 @@ class BaichuanDownloader:
         tmp_path: Path | None = None
         out_file = None
         prefix = bytearray()
+        end_reason = "loop exited unexpectedly"  # overwritten before every break below
 
         def start_writing(sniff_buf: bytes | bytearray) -> None:
             nonlocal codec, raw_path, tmp_path, out_file
@@ -487,6 +488,7 @@ class BaichuanDownloader:
                 try:
                     cmd_id, mess_id, status, mclass, poff, body = await self._read_message()
                 except (asyncio.IncompleteReadError, ConnectionError) as e:
+                    end_reason = f"the connection closing ({type(e).__name__})"
                     self._dbg(f"stream closed after {nmsg} media msgs ({type(e).__name__})")
                     break  # camera closed the stream; decode what we have
                 if cmd_id != 143:
@@ -501,6 +503,7 @@ class BaichuanDownloader:
                         print(f"  Still waiting for media data ({discarded} unrelated message(s) from camera so far)...")
                     continue
                 if not body:
+                    end_reason = "a clean end-of-stream marker (cmd143 len=0)"
                     self._dbg(f"end-of-stream marker (cmd143 len=0) after {nmsg} media msgs")
                     break  # zero-length cmd 143 marks end of stream
                 if poff == 0:
@@ -551,7 +554,8 @@ class BaichuanDownloader:
                 raise BaichuanError(
                     f"received only {bytes_received} bytes but the camera reports this recording as "
                     f"~{total_size} bytes ({bytes_received / total_size:.0%}) — likely an incomplete "
-                    f"download despite a clean end-of-stream signal"
+                    f"download; stream ended via {end_reason} after {nmsg} media message(s) and "
+                    f"{discarded} unrelated message(s)"
                 )
 
             if codec is None:
