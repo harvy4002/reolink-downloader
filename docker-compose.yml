@@ -1,14 +1,70 @@
+# reolink-downloader — one-off Compose job for a Synology NAS / Container Manager.
+#
+# Quick start on Synology:
+#   1. In File Station, create a shared folder (e.g. docker/reolink-downloader) and
+#      upload just this one file into it — the `build:` line below points straight at
+#      the public GitHub repo, so Container Manager doesn't need the rest of the source.
+#   2. Open Container Manager → Project → Create, set "Path" to that folder, and let it
+#      pick up this docker-compose.yml.
+#   3. Edit the `environment:` values below for your camera (or, for secrets you'd
+#      rather not keep in this tracked file, create a sibling `.env` file in the same
+#      folder with e.g. `REOLINK_PASSWORD=...` — Compose substitutes `${VAR}` from it
+#      automatically, and unset vars just fall through to what's typed here).
+#   4. Build + run once: `docker compose up --build` (or, in Container Manager, click
+#      Build then Start). It downloads everything in the configured date range and
+#      exits — it does not run on a schedule.
+#   5. To fetch a new batch, edit REOLINK_START_TIME/REOLINK_END_TIME and re-run
+#      (`docker compose up --build` again, or Container Manager's Action → Build/Start).
+#
+# The git-context build re-clones and rebuilds from the repo's current `main` branch
+# every time. For a reproducible/pinned build instead, replace `#main` below with a
+# specific tag or commit, e.g. `#v1.2.3`. If you already have the full repo checked out
+# locally (e.g. for development), swap the `build:` line for the commented `build: .`
+# alternative to build from the local source tree instead.
+
 services:
   reolink-downloader:
-    build: .
+    build: https://github.com/harvy4002/reolink-downloader.git#main
+    # build: .
     image: reolink-downloader:latest
-    env_file:
-      - .env
     volumes:
       - ./downloads:/downloads
-    # One-off job: downloads everything in the configured date range, then
-    # exits. Don't restart it automatically — re-run manually each time you
-    # want a new batch (`docker compose up` or `docker compose run --rm
-    # reolink-downloader`). On Synology's Container Manager, make sure the
-    # project's "auto-restart" setting is off for the same reason.
+    environment:
+      # --- Required: no defaults, so a typo/omission still gets caught by the
+      # tool's own "missing required option" error rather than silently running. ---
+      REOLINK_IP: ${REOLINK_IP}              # e.g. 192.168.1.100
+      REOLINK_USERNAME: ${REOLINK_USERNAME}  # e.g. admin
+      REOLINK_PASSWORD: ${REOLINK_PASSWORD}  # e.g. changeme
+      REOLINK_START_TIME: ${REOLINK_START_TIME}  # e.g. 2024-01-01 or "2024-01-01 14:30:00"
+      REOLINK_END_TIME: ${REOLINK_END_TIME}      # e.g. 2024-01-02
+
+      # --- Optional: shown with the tool's actual defaults. ---
+      # Channel(s) to download: 'all', a single index, a comma list, a range, or a
+      # combination — e.g. '0', '0,2,5', '0-3', '0,2-4,7'.
+      REOLINK_CHANNEL: ${REOLINK_CHANNEL:-all}
+      # Concurrent Baichuan download connections. Reolink PoE NVRs support at most 4
+      # concurrent playback streams.
+      REOLINK_CONCURRENCY: ${REOLINK_CONCURRENCY:-3}
+      # wide, telephoto, or both — only matters for cameras/channels with a second
+      # (telephoto) lens; automatically ignored elsewhere.
+      REOLINK_LENS: ${REOLINK_LENS:-both}
+      # Cap on total recordings downloaded across all selected channels. Leave the
+      # substitution default empty to download everything found.
+      REOLINK_LIMIT: ${REOLINK_LIMIT:-}
+      # Print the raw Baichuan protocol exchange, for diagnosing a failed download.
+      REOLINK_DEBUG: ${REOLINK_DEBUG:-false}
+
+      # --- Optional: Telegram notifications. Both must be set to enable them; leave
+      # both empty (the default) to disable. ---
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+
+      # Do NOT set REOLINK_OUTPUT here — the image fixes it to /downloads, which the
+      # volume line above bind-mounts to ./downloads next to this file. Change the
+      # host side of that mount instead if you want recordings written elsewhere.
+
+    # One-off job: downloads everything in the configured date range, then exits.
+    # Don't restart it automatically — re-run manually each time you want a new batch.
+    # On Synology's Container Manager, make sure the project's "auto-restart" setting
+    # is off for the same reason.
     restart: "no"

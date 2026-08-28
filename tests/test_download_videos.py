@@ -149,3 +149,116 @@ async def test_no_recordings_sends_zero_count_finish(tmp_path, monkeypatch):
 
     assert fake_bc_cls.calls == []
     assert any("Found: 0, downloaded: 0, failed: 0" in m for m in notifier.messages)
+
+
+async def test_transient_failure_recovers_via_retry(tmp_path, monkeypatch):
+    # This file fails its first 2 attempts, then succeeds on the 3rd — well
+    # within the 1 + MAX_RETRIES(3) = 4 attempt budget, so the run should
+    # report it as downloaded, not failed, and never notify Telegram of an
+    # error for it.
+    recordings = {(0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("flaky", 1)])}
+    fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls(fail_times={"20240115_010000_wide_flaky": 2})
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        concurrency=1,
+        notifier=notifier,
+    )
+
+    assert fake_bc_cls.attempt_counts["20240115_010000_wide_flaky"] == 3
+    files = list((tmp_path / "ch00_Cam0").glob("*.mp4"))
+    assert len(files) == 1
+    assert not any("failed to download" in m for m in notifier.messages)
+    assert any("Found: 1, downloaded: 1, failed: 0" in m for m in notifier.messages)
+
+
+async def test_permanent_failure_reported_after_exhausting_retries(tmp_path, monkeypatch):
+    recordings = {(0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("dead", 1)])}
+    fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls(fail_predicate=lambda name: True)
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        concurrency=1,
+        notifier=notifier,
+    )
+
+    # 1 initial attempt + MAX_RETRIES(3) retries = 4 total attempts, then give up.
+    assert fake_bc_cls.attempt_counts["20240115_010000_wide_dead"] == rd.MAX_RETRIES + 1
+    assert list((tmp_path / "ch00_Cam0").glob("*.mp4")) == []
+    error_messages = [m for m in notifier.messages if "failed to download" in m]
+    assert len(error_messages) == 1
+    assert "4 attempts" in error_messages[0]
+
+
+async def test_worker_reconnects_after_transient_connection_failure(tmp_path, monkeypatch):
+    # The worker's initial connection fails twice before succeeding — well
+    # within the retry budget — so the job it was about to process still
+    # completes rather than the whole run silently downloading nothing.
+    recordings = {(0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("a", 1)])}
+    fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls(connect_fail_times=2)
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        concurrency=1,
+    )
+
+    files = list((tmp_path / "ch00_Cam0").glob("*.mp4"))
+    assert len(files) == 1
+
+
+async def test_worker_gives_up_after_exhausting_reconnect_attempts(tmp_path, monkeypatch, capsys):
+    # The connection never succeeds; with concurrency=1 there's no sibling
+    # worker to pick up the slack, so the job is never attempted at all —
+    # but the run must still finish cleanly (no hang, no crash).
+    recordings = {(0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("a", 1)])}
+    fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls(connect_fail_times=100)
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        concurrency=1,
+    )
+
+    assert fake_bc_cls.calls == []
+    assert "giving up on this worker" in capsys.readouterr().err

@@ -68,6 +68,24 @@ The "Overall progress" line updates after every file across all channels/workers
 combined, so you always know how far through the whole job you are, not just the file
 currently downloading.
 
+## Auto-recovery (retries)
+
+A failed download is retried automatically — up to 3 retries (4 attempts total) with a
+short delay between them — before it's logged and reported to Telegram as a permanent
+failure. The first attempt reuses the worker's existing connection; retries open a fresh
+connection each time, since a stale or dropped connection is often *why* the first
+attempt failed. A file that recovers on a retry is counted as succeeded, not failed, and
+never triggers a Telegram error notification — only a permanent (all-attempts-exhausted)
+failure does.
+
+The same retry budget applies if a worker's *initial* connection to the NVR fails (e.g. a
+transient network hiccup): it retries connecting up to 3 more times before giving up on
+that worker, so a single flaky connection attempt can't silently skip a whole batch of
+downloads. Jobs are pulled from one shared queue, so if a worker does exhaust its
+reconnect attempts, any other workers (`--concurrency` > 1) simply pick up the rest —
+only with `--concurrency 1` (no other worker to fall back on) would a total connection
+failure leave the queue unprocessed.
+
 ## Telegram notifications (optional)
 
 Set these two environment variables to get run start/finish, per-channel progress,
@@ -118,21 +136,43 @@ required options — set each one via its flag or its environment variable.
 
 ## Docker
 
-See [`docker-compose.yml`](docker-compose.yml) for a ready-to-use Compose file (works on
-Synology's Container Manager too) and [`.env.example`](.env.example) for the settings it
-reads. This is a one-off job, not a long-running service: the container starts, downloads
-everything in the configured date range, and exits.
+[`docker-compose.yml`](docker-compose.yml) is a ready-to-use, **self-contained** Compose
+file: every setting is listed inline under `environment:` with the tool's real defaults
+and an example value in a comment, so you don't need to hunt through a separate file to
+see what's configurable. This is a one-off job, not a long-running service — the
+container starts, downloads everything in the configured date range, and exits.
+
+Its `build:` line points directly at this repo on GitHub
+(`https://github.com/harvy4002/reolink-downloader.git#main`), using Docker's built-in
+support for building from a remote Git URL. That means **you only need to copy
+`docker-compose.yml` itself** to wherever you're running it — Docker clones and builds
+the rest during `docker compose up --build`. If you'd rather build from a local checkout
+(e.g. for development), swap in the commented `build: .` line instead.
 
 ```
-cp .env.example .env    # fill in your camera details and date range
-docker compose up       # or: docker compose run --rm reolink-downloader
+docker compose up --build     # first run: builds the image, then downloads
+docker compose up --build     # later runs: edit REOLINK_START_TIME/END_TIME first
 ```
 
-On Synology, upload the project (or just `docker-compose.yml`/`.env`/`Dockerfile`) to a
-shared folder, then open **Container Manager → Project → Create** and point it at that
-folder — Container Manager understands `docker-compose.yml` directly. Downloaded videos
-land in the `./downloads` folder next to the compose file (bind-mounted into the
-container), so they survive after the container exits.
+Real credentials can be typed directly into `docker-compose.yml`, but since that file is
+tracked in git, prefer creating a sibling `.env` file (see [`.env.example`](.env.example)
+for the full list of keys) in the same folder instead — Compose substitutes `${VAR}` from
+it automatically, so secrets never need to be committed. `.env` is already covered by
+this repo's `.gitignore`.
+
+### Synology Container Manager
+
+1. In File Station, create a shared folder (e.g. `docker/reolink-downloader`) and upload
+   just `docker-compose.yml` into it (plus an optional `.env` for secrets, per above).
+2. Open **Container Manager → Project → Create**, set "Path" to that folder — Container
+   Manager picks up `docker-compose.yml` automatically.
+3. Build and start the project. Since this is a one-off job, leave the project's
+   auto-restart setting off (the compose file also sets `restart: "no"`).
+4. To fetch a new batch, edit `REOLINK_START_TIME`/`REOLINK_END_TIME` (in the compose
+   file or `.env`) and re-run the project's Build/Start actions.
+
+Downloaded videos land in the `./downloads` folder next to the compose file
+(bind-mounted into the container), so they survive after the container exits.
 
 ## Usage
 

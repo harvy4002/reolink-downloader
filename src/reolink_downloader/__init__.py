@@ -34,6 +34,12 @@ LENS_STREAMS: dict[str, tuple[str, str]] = {
 
 MAX_RECOMMENDED_CONCURRENCY = 4  # Reolink PoE NVRs cap concurrent playback streams at 4.
 
+# Auto-recovery: a failed download (or a worker's initial connection) is
+# retried this many times before being logged and reported as a permanent
+# failure. Total attempts = 1 initial try + this many retries.
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 2.0
+
 
 @dataclass
 class DownloadJob:
@@ -99,6 +105,54 @@ def _make_progress_logger(job: "DownloadJob", worker_id: int):
         state["last_log"] = now
 
     return _on_progress
+
+
+async def _attempt_download(bc: BaichuanDownloader, job: "DownloadJob", worker_id: int) -> Path:
+    try:
+        total_size = job.vod_file.size
+    except Exception:
+        total_size = None
+    return await bc.download(
+        job.output_base,
+        start=job.vod_file.start_time,
+        end=job.vod_file.end_time,
+        channel=job.download_channel,
+        stream_type="mainStream",
+        total_size=total_size,
+        on_progress=_make_progress_logger(job, worker_id),
+    )
+
+
+async def _download_with_retries(
+    job: "DownloadJob",
+    worker_id: int,
+    bc: BaichuanDownloader,
+    ip: str,
+    username: str,
+    password: str,
+    debug: bool,
+) -> Path:
+    """Attempt job's download up to 1 + MAX_RETRIES times. The first attempt
+    reuses the worker's long-lived connection; retries open a fresh
+    short-lived connection each time, since a stale/broken connection may be
+    why the first attempt failed. Raises the last error if every attempt
+    fails."""
+    last_error: BaichuanError | OSError | None = None
+    for attempt in range(1, MAX_RETRIES + 2):
+        try:
+            if attempt == 1:
+                return await _attempt_download(bc, job, worker_id)
+            print(
+                f"  Retrying [{job.idx}] {job.output_base.name} "
+                f"(attempt {attempt}/{MAX_RETRIES + 1}; previous error: {last_error})"
+            )
+            await asyncio.sleep(RETRY_DELAY_SECONDS)
+            async with BaichuanDownloader(ip, username, password, debug=debug) as retry_bc:
+                return await _attempt_download(retry_bc, job, worker_id)
+        except (BaichuanError, OSError) as e:
+            last_error = e
+    assert last_error is not None
+    raise last_error
 
 
 async def _search_channel(
@@ -188,72 +242,81 @@ async def _download_worker(
     progress_state: dict,
 ) -> None:
     """Drain the shared download queue using one persistent Baichuan
-    connection. Any per-file failure is recorded and reported, never allowed
-    to stop this worker; a connect/login failure ends this worker only,
+    connection. Each file gets up to 1 + MAX_RETRIES attempts before being
+    logged and reported to Telegram as a permanent failure; a permanent
+    failure never stops the worker. The worker's own initial connection is
+    retried the same number of times before this worker gives up entirely,
     leaving the remaining jobs for its siblings to pick up."""
-    try:
-        async with BaichuanDownloader(ip, username, password, debug=debug) as bc:
-            while True:
-                job = await queue.get()
-                if job is None:
-                    queue.task_done()
-                    break
-                try:
-                    print(
-                        f"Downloading [{job.idx}/{total}] (worker {worker_id}): {job.output_base.name} "
-                        f"({job.vod_file.start_time} - {job.vod_file.end_time})..."
-                    )
+    for connect_attempt in range(1, MAX_RETRIES + 2):
+        try:
+            async with BaichuanDownloader(ip, username, password, debug=debug) as bc:
+                while True:
+                    job = await queue.get()
+                    if job is None:
+                        queue.task_done()
+                        return
                     try:
-                        total_size = job.vod_file.size
-                    except Exception:
-                        total_size = None
-                    written = await bc.download(
-                        job.output_base,
-                        start=job.vod_file.start_time,
-                        end=job.vod_file.end_time,
-                        channel=job.download_channel,
-                        stream_type="mainStream",
-                        total_size=total_size,
-                        on_progress=_make_progress_logger(job, worker_id),
-                    )
-                    print(f"  Saved to: {written}")
-                    downloaded_count[0] += 1
-                except (BaichuanError, OSError) as e:
-                    print(f"  Failed: {e}", file=sys.stderr)
-                    channel_errors[job.channel] = channel_errors.get(job.channel, 0) + 1
-                    await notifier.notify_error(channel=job.channel, file_name=job.output_base.name, error=str(e))
-                finally:
-                    queue.task_done()
-                    channel_done[job.channel] = channel_done.get(job.channel, 0) + 1
-
-                    failed_total = sum(channel_errors.values())
-                    done_total = downloaded_count[0] + failed_total
-                    pct = done_total * 100 // total if total else 100
-                    print(
-                        f"Overall progress: {done_total}/{total} ({pct}%) — "
-                        f"{downloaded_count[0]} succeeded, {failed_total} failed"
-                    )
-                    # Throttle Telegram overall-progress updates to every 25%
-                    # step (plus the final message) so a large job doesn't
-                    # spam the chat with one message per file.
-                    bucket = pct // 25
-                    if bucket > progress_state["last_bucket"] or done_total == total:
-                        progress_state["last_bucket"] = bucket
-                        await notifier.notify_progress(
-                            done=done_total, total=total,
-                            succeeded=downloaded_count[0], failed=failed_total,
+                        print(
+                            f"Downloading [{job.idx}/{total}] (worker {worker_id}): {job.output_base.name} "
+                            f"({job.vod_file.start_time} - {job.vod_file.end_time})..."
                         )
-
-                    if channel_done[job.channel] == channel_totals[job.channel]:
-                        await notifier.notify_channel_progress(
+                        written = await _download_with_retries(
+                            job, worker_id, bc, ip, username, password, debug
+                        )
+                        print(f"  Saved to: {written}")
+                        downloaded_count[0] += 1
+                    except (BaichuanError, OSError) as e:
+                        print(f"  Failed after {MAX_RETRIES + 1} attempts: {e}", file=sys.stderr)
+                        channel_errors[job.channel] = channel_errors.get(job.channel, 0) + 1
+                        await notifier.notify_error(
                             channel=job.channel,
-                            name=channel_names[job.channel],
-                            phase="download complete",
-                            succeeded=channel_totals[job.channel] - channel_errors.get(job.channel, 0),
-                            failed=channel_errors.get(job.channel, 0),
+                            file_name=job.output_base.name,
+                            error=f"{e} (after {MAX_RETRIES + 1} attempts)",
                         )
-    except (BaichuanError, OSError, ConnectionError) as e:
-        print(f"Worker {worker_id}: connection failed, giving up on this worker: {e}", file=sys.stderr)
+                    finally:
+                        queue.task_done()
+                        channel_done[job.channel] = channel_done.get(job.channel, 0) + 1
+
+                        failed_total = sum(channel_errors.values())
+                        done_total = downloaded_count[0] + failed_total
+                        pct = done_total * 100 // total if total else 100
+                        print(
+                            f"Overall progress: {done_total}/{total} ({pct}%) — "
+                            f"{downloaded_count[0]} succeeded, {failed_total} failed"
+                        )
+                        # Throttle Telegram overall-progress updates to every
+                        # 25% step (plus the final message) so a large job
+                        # doesn't spam the chat with one message per file.
+                        bucket = pct // 25
+                        if bucket > progress_state["last_bucket"] or done_total == total:
+                            progress_state["last_bucket"] = bucket
+                            await notifier.notify_progress(
+                                done=done_total, total=total,
+                                succeeded=downloaded_count[0], failed=failed_total,
+                            )
+
+                        if channel_done[job.channel] == channel_totals[job.channel]:
+                            await notifier.notify_channel_progress(
+                                channel=job.channel,
+                                name=channel_names[job.channel],
+                                phase="download complete",
+                                succeeded=channel_totals[job.channel] - channel_errors.get(job.channel, 0),
+                                failed=channel_errors.get(job.channel, 0),
+                            )
+        except (BaichuanError, OSError, ConnectionError) as e:
+            if connect_attempt >= MAX_RETRIES + 1:
+                print(
+                    f"Worker {worker_id}: connection failed after {connect_attempt} attempts, "
+                    f"giving up on this worker: {e}",
+                    file=sys.stderr,
+                )
+                return
+            print(
+                f"Worker {worker_id}: connection failed (attempt {connect_attempt}/{MAX_RETRIES + 1}), "
+                f"reconnecting: {e}",
+                file=sys.stderr,
+            )
+            await asyncio.sleep(RETRY_DELAY_SECONDS)
 
 
 async def download_videos(

@@ -6,8 +6,18 @@ orchestration in download_videos() can be exercised without a real NVR.
 
 from __future__ import annotations
 
+import pytest
+
+import reolink_downloader as rd
 from reolink_downloader.baichuan import BaichuanError
 from reolink_downloader.telegram import TelegramNotifier
+
+
+@pytest.fixture(autouse=True)
+def _fast_retries(monkeypatch):
+    """download_videos() sleeps RETRY_DELAY_SECONDS between retry attempts;
+    zero it out so tests exercising retry/reconnect logic run instantly."""
+    monkeypatch.setattr(rd, "RETRY_DELAY_SECONDS", 0)
 
 
 class FakeStatus:
@@ -68,17 +78,34 @@ def make_fake_host_class(*, channels, is_nvr=True, dual_lens_channels=(), names=
     return FakeHost
 
 
-def make_fake_baichuan_cls(*, fail_predicate=lambda name: False):
+def make_fake_baichuan_cls(*, fail_predicate=lambda name: False, fail_times=None, connect_fail_times=0):
     """Build a fake BaichuanDownloader replacement. Records (channel, name)
     for every download() call in the returned class's `.calls` list, and
-    simulates a couple of progress ticks when total_size is known."""
+    simulates a couple of progress ticks when total_size is known.
+
+    fail_predicate(name): if True, this job's download() always raises
+        (permanent failure regardless of retries).
+    fail_times: dict[out_path.name, N] — this job's first N download()
+        attempts raise BaichuanError, then it succeeds (simulates a
+        transient failure that auto-recovery retries past).
+    connect_fail_times: the first N BaichuanDownloader connections (across
+        the whole fake class, i.e. the worker's initial connection and any
+        retry reconnections) raise on __aenter__, then succeed — simulates
+        a flaky NVR connection.
+    """
     calls: list[tuple[int, str]] = []
+    attempt_counts: dict[str, int] = {}
+    fail_times = fail_times or {}
+    connect_state = {"count": 0}
 
     class FakeBaichuanDownloader:
         def __init__(self, ip, username, password, debug=False):
             self.ip = ip
 
         async def __aenter__(self):
+            connect_state["count"] += 1
+            if connect_state["count"] <= connect_fail_times:
+                raise BaichuanError(f"simulated connect failure #{connect_state['count']}")
             return self
 
         async def __aexit__(self, *exc):
@@ -86,15 +113,18 @@ def make_fake_baichuan_cls(*, fail_predicate=lambda name: False):
 
         async def download(self, out_path, *, start, end, channel, stream_type, total_size=None, on_progress=None):
             calls.append((channel, out_path.name))
+            attempt_counts[out_path.name] = attempt_counts.get(out_path.name, 0) + 1
             if on_progress is not None and total_size:
                 on_progress(total_size // 2, total_size)
                 on_progress(total_size, total_size)
-            if fail_predicate(out_path.name):
-                raise BaichuanError("simulated failure")
+            required_failures = fail_times.get(out_path.name, 0)
+            if attempt_counts[out_path.name] <= required_failures or fail_predicate(out_path.name):
+                raise BaichuanError(f"simulated failure (attempt {attempt_counts[out_path.name]})")
             out_path.with_suffix(".mp4").write_bytes(b"fake")
             return out_path.with_suffix(".mp4")
 
     FakeBaichuanDownloader.calls = calls
+    FakeBaichuanDownloader.attempt_counts = attempt_counts
     return FakeBaichuanDownloader
 
 
