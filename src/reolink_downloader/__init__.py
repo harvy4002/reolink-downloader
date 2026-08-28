@@ -9,6 +9,7 @@ import argparse
 import asyncio
 import os
 import re
+import signal
 import sys
 import time
 from dataclasses import dataclass
@@ -687,6 +688,29 @@ def _env(name: str, default: str | None = None) -> str | None:
     return value if value else default
 
 
+async def _run_with_graceful_shutdown(coro) -> None:
+    """Run coro, logging and cancelling it on SIGTERM/SIGINT rather than
+    leaving the process to be force-killed with no trace. Docker (and
+    Container Manager/Portainer) sends SIGTERM on stop/restart and waits a
+    grace period before SIGKILL — logging receipt here is the only way to
+    tell "something told us to stop" apart from a real SIGKILL/OOM kill,
+    which is uncatchable and inherently leaves no application-level trace."""
+    task = asyncio.ensure_future(coro)
+    loop = asyncio.get_running_loop()
+
+    def _handle_signal(sig: int) -> None:
+        print(f"\nReceived {signal.Signals(sig).name}, shutting down...", file=sys.stderr)
+        task.cancel()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _handle_signal, sig)
+        except NotImplementedError:
+            pass  # e.g. Windows, which doesn't support add_signal_handler
+
+    await task
+
+
 def main():
     """Main entry point for the CLI application."""
     parser = argparse.ArgumentParser(
@@ -844,22 +868,24 @@ def main():
     # Run the async download function
     try:
         asyncio.run(
-            download_videos(
-                ip=args.ip,
-                username=args.username,
-                password=args.password,
-                start_time=start_time,
-                end_time=end_time,
-                output_dir=output_dir,
-                lenses=lenses,
-                channel_spec=channel_spec,
-                concurrency=args.concurrency,
-                debug=args.debug,
-                limit=args.limit,
+            _run_with_graceful_shutdown(
+                download_videos(
+                    ip=args.ip,
+                    username=args.username,
+                    password=args.password,
+                    start_time=start_time,
+                    end_time=end_time,
+                    output_dir=output_dir,
+                    lenses=lenses,
+                    channel_spec=channel_spec,
+                    concurrency=args.concurrency,
+                    debug=args.debug,
+                    limit=args.limit,
+                )
             )
         )
-    except KeyboardInterrupt:
-        print("\nDownload cancelled by user")
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("\nDownload cancelled")
         sys.exit(1)
     except Exception as e:
         print(f"Fatal error: {e}", file=sys.stderr)

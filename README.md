@@ -107,6 +107,12 @@ makes it fine to kill and re-run a large job (thousands of files can take hours)
 an interruption — a container restart, a Ctrl-C, hitting the retry budget on a
 particularly bad connection — without redownloading everything from scratch.
 
+A `SIGTERM` (what Docker/Portainer/Container Manager send on stop or restart, before
+force-killing with `SIGKILL` if the process doesn't exit in time) is caught and logged
+before shutting down, so a deliberate stop is distinguishable in the logs from an actual
+`SIGKILL`/OOM kill — the latter is uncatchable and leaves no application-level trace at
+all, which is expected if you ever see the container exit with no log line about it.
+
 ## Telegram notifications (optional)
 
 Set these two environment variables to get run start/finish, per-channel progress,
