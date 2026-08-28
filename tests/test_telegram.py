@@ -104,3 +104,24 @@ class TestSendsWhenEnabled:
             )
 
         assert "notification failed" in capsys.readouterr().err
+
+    async def test_finish_message_mentions_skipped_too_large_only_when_nonzero(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "abc123")
+        monkeypatch.setenv("TELEGRAM_CHAT_ID", "999")
+        notifier = TelegramNotifier()
+        session, session_cm = self._mock_session()
+
+        with patch("aiohttp.ClientSession", return_value=session_cm):
+            await notifier.notify_finish(
+                ip="1.2.3.4", total_found=5, total_downloaded=3, total_failed=2,
+                output_dir=".", skipped_too_large=2,
+            )
+        text = session.post.call_args.kwargs["data"]["text"]
+        assert "2 skipped (too large)" in text
+
+        with patch("aiohttp.ClientSession", return_value=session_cm):
+            await notifier.notify_finish(
+                ip="1.2.3.4", total_found=5, total_downloaded=5, total_failed=0, output_dir="."
+            )
+        text = session.post.call_args.kwargs["data"]["text"]
+        assert "skipped" not in text

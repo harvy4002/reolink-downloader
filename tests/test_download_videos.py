@@ -522,4 +522,10 @@ async def test_oversized_recording_is_skipped_without_retries(tmp_path, monkeypa
     files = list((tmp_path / "2024-01-15" / "ch00_Cam0").glob("*.mp4"))
     assert len(files) == 1
     assert "ch0_a" in files[0].name
-    assert any("skipped, too large" in m for m in notifier.messages)
+
+    # No per-file Telegram notification for a size-skip (that would be as
+    # spammy as the per-file progress messages Telegram already avoids
+    # elsewhere) -- it's summarized once in the finish message instead.
+    assert not any("too large" in m for m in notifier.messages if "finished run" not in m)
+    finish_message = next(m for m in notifier.messages if "finished run" in m)
+    assert "1 skipped (too large)" in finish_message

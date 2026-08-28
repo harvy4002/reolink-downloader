@@ -111,11 +111,14 @@ class TelegramNotifier:
         total_failed: int,
         output_dir: str,
         already_present: int = 0,
+        skipped_too_large: int = 0,
     ) -> None:
         already_note = f", {already_present} already on disk" if already_present else ""
+        skipped_note = f", {skipped_too_large} skipped (too large)" if skipped_too_large else ""
         await self._send(
             f"✅ reolink-downloader: finished run against {ip}\n"
-            f"Found: {total_found}, downloaded: {total_downloaded}, failed: {total_failed}{already_note}\n"
+            f"Found: {total_found}, downloaded: {total_downloaded}, failed: {total_failed}"
+            f"{already_note}{skipped_note}\n"
             f"Output: {output_dir}"
         )
 

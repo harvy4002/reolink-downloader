@@ -325,6 +325,7 @@ async def _download_worker(
     notifier: TelegramNotifier,
     downloaded_count: list[int],
     progress_state: dict,
+    skipped_too_large_count: list[int],
     max_download_bytes: int | None = None,
 ) -> None:
     """Drain the shared download queue using one persistent Baichuan
@@ -332,7 +333,14 @@ async def _download_worker(
     logged and reported to Telegram as a permanent failure; a permanent
     failure never stops the worker. The worker's own initial connection is
     retried the same number of times before this worker gives up entirely,
-    leaving the remaining jobs for its siblings to pick up."""
+    leaving the remaining jobs for its siblings to pick up.
+
+    Files skipped for being too large are logged to the console immediately
+    (same as any other failure) but not reported to Telegram individually —
+    with potentially many oversized files in one run, that would be as noisy
+    as the per-file progress spam Telegram notifications are already
+    designed to avoid elsewhere. Instead they're counted here and summarized
+    once in the final notify_finish message."""
     for connect_attempt in range(1, MAX_RETRIES + 2):
         try:
             async with BaichuanDownloader(ip, username, password, debug=debug) as bc:
@@ -354,9 +362,7 @@ async def _download_worker(
                     except BaichuanFileTooLargeError as e:
                         print(f"  Skipped (too large): {e}", file=sys.stderr)
                         channel_errors[job.channel] = channel_errors.get(job.channel, 0) + 1
-                        await notifier.notify_error(
-                            channel=job.channel, file_name=job.output_base.name, error=f"skipped, too large: {e}"
-                        )
+                        skipped_too_large_count[0] += 1
                     except (BaichuanError, OSError) as e:
                         print(f"  Failed after {MAX_RETRIES + 1} attempts: {e}", file=sys.stderr)
                         channel_errors[job.channel] = channel_errors.get(job.channel, 0) + 1
@@ -609,6 +615,7 @@ async def download_videos(
         channel_done: dict[int, int] = {}
         channel_errors: dict[int, int] = {}
         downloaded_count = [0]
+        skipped_too_large_count = [0]
         progress_state = {"last_bucket": -1}
 
         heartbeat_task = asyncio.create_task(
@@ -635,6 +642,7 @@ async def download_videos(
                         notifier,
                         downloaded_count,
                         progress_state,
+                        skipped_too_large_count,
                         max_download_mb * 1_000_000 if max_download_mb is not None else None,
                     )
                     for worker_id in range(concurrency)
@@ -665,6 +673,7 @@ async def download_videos(
             total_failed=total_failed,
             output_dir=str(output_dir),
             already_present=already_downloaded,
+            skipped_too_large=skipped_too_large_count[0],
         )
 
     except Exception as e:

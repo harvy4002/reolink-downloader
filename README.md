@@ -140,12 +140,16 @@ to keep the peak memory overhead as low as it reasonably can be.
 If you've actually hit an out-of-memory crash (the container just dies, no application
 error logged — that's what an OOM kill looks like), set `--max-download-mb`
 (`REOLINK_MAX_DOWNLOAD_MB`) to a ceiling appropriate for your device's available memory.
-A recording that exceeds it is skipped immediately — logged and reported to Telegram as
-a permanent failure, with no retries wasted on it, since the same recording would hit the
-same limit again every time — rather than risking another crash downloading it in full.
-Unset by default (no cap), since it's a hard skip, not just a warning: only turn it on if
-you've actually seen memory pressure, so you don't unexpectedly lose recordings that
-would have downloaded fine.
+A recording that exceeds it is skipped immediately with no retries wasted on it, since
+the same recording would hit the same limit again every time — rather than risking
+another crash downloading it in full. Unset by default (no cap), since it's a hard skip,
+not just a warning: only turn it on if you've actually seen memory pressure, so you don't
+unexpectedly lose recordings that would have downloaded fine.
+
+Each skipped-for-size file is still logged to the console immediately as it happens, but
+Telegram only gets a single count of them in the final finish message (e.g. "2 skipped
+(too large)") rather than one notification per skipped file — a run with many oversized
+files would otherwise be as noisy as the per-file spam Telegram already avoids elsewhere.
 
 ## Resuming interrupted runs
 
