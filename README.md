@@ -189,9 +189,15 @@ or commit SHA (and `REPO_URL` if you want to point at a fork).
 Downloaded videos land in the `./downloads` folder next to the compose file
 (bind-mounted into the container), so they survive after the container exits.
 
-> The image itself is public on GHCR, so no registry login is needed on the NAS. If
-> `docker pull` ever fails with an authorization error, the package's visibility may
-> need to be set to public in the repo's GitHub Packages settings.
+> **`denied` pulling from ghcr.io on Synology?** The image is public — anonymous pulls
+> work fine from a normal Docker install — but some Synology Container Manager/DSM
+> Docker daemon versions fail to negotiate GHCR's anonymous pull correctly (or have a
+> stale/invalid cached login for `ghcr.io` that gets sent instead of an anonymous
+> request), producing a misleading `denied` error even though nothing is actually
+> private. Fix: add an explicit login for `ghcr.io` in **Container Manager → Registry →
+> Settings → Add**, using your GitHub username and a
+> [Personal Access Token (classic)](https://github.com/settings/tokens) scoped to just
+> `read:packages`. Authenticated pulls sidestep this class of bug regardless of cause.
 
 ## Usage
 
