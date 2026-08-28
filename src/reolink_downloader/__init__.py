@@ -196,12 +196,23 @@ async def _download_with_retries(
     raise last_error
 
 
+def _sub_stream_name(stream: str) -> str:
+    """The 'sub' stream counterpart of a LENS_STREAMS main stream name, for
+    the --debug diagnostic comparison in _search_channel only."""
+    if stream.endswith("_main"):
+        return stream[: -len("_main")] + "_sub"
+    if stream == "main":
+        return "sub"
+    return stream
+
+
 async def _search_channel(
     host: Host,
     channel: int,
     lenses: list[str],
     start_time: datetime,
     end_time: datetime,
+    debug: bool = False,
 ) -> list[tuple[int, str, object]]:
     """Search one channel for recordings in the given range across the
     requested (and applicable) lenses, day by day."""
@@ -260,6 +271,30 @@ async def _search_channel(
                 if day_files:
                     found.extend((channel, lens_label, f) for f in day_files)
                     print(f"    Found {len(day_files)} file(s)")
+
+                # Diagnostic only (--debug): compare against the 'sub'
+                # stream's file count for the same day/channel, to check
+                # whether recordings exist on a stream this tool never
+                # searches by default. Console-only, not sent to Telegram,
+                # and never merged into `found` / the download list.
+                if debug:
+                    sub_stream = _sub_stream_name(stream)
+                    try:
+                        _, sub_day_files = await host.request_vod_files(
+                            channel=channel,
+                            start=max(day_start, start_time),
+                            end=min(day_end, end_time),
+                            status_only=False,
+                            stream=sub_stream,
+                        )
+                    except ReolinkError as e:
+                        print(f"    [diag] Channel {channel}: {sub_stream} search failed for "
+                              f"{year}-{month:02d}-{day:02d}: {e}", file=sys.stderr)
+                    else:
+                        print(
+                            f"    [diag] {year}-{month:02d}-{day:02d} stream comparison: "
+                            f"{stream}={len(day_files)} {sub_stream}={len(sub_day_files or [])}"
+                        )
 
     return found
 
@@ -436,7 +471,7 @@ async def download_videos(
         # this is safe even though it doesn't always yield a full speedup.
         results = await asyncio.gather(
             *(
-                _search_channel(host, channel, lenses, start_time, end_time)
+                _search_channel(host, channel, lenses, start_time, end_time, debug)
                 for channel in selected_channels
             ),
             return_exceptions=True,

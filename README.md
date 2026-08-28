@@ -24,6 +24,24 @@ stream (`.h264`/`.h265`), playable directly in VLC/ffmpeg. This tool intentional
 no conversion — a separate tool for turning these into a more universally playable
 format (e.g. `.mp4`) is planned.
 
+### If the clip count doesn't match the mobile app
+
+This tool only ever searches the camera's "main" (or "telephoto_main") recording stream.
+If your NVR clip count looks lower here than in Reolink's mobile app for the same
+day/channel, one likely cause is recordings that only exist on the "sub" stream (can
+happen with certain storage-saving settings or recording-schedule configurations).
+`--debug` prints a diagnostic, console-only comparison for every day/channel searched —
+it does **not** change what gets downloaded, and never gets sent to Telegram:
+
+```
+    Found 12 file(s)
+    [diag] 2024-01-15 stream comparison: main=12 sub=15
+```
+
+If `sub` is consistently higher than `main` for days you know are affected, that
+confirms the stream mismatch as the cause — let me know and I can look at searching
+both streams and merging/de-duplicating the results.
+
 ## Multi-channel NVRs
 
 By default (`--channel all`) the tool auto-detects and downloads every channel your NVR

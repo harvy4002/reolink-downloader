@@ -427,3 +427,66 @@ async def test_no_heartbeat_after_download_phase_completes(tmp_path, monkeypatch
     message_count_at_finish = len(notifier.messages)
     await asyncio.sleep(0.2)  # well past several heartbeat intervals
     assert len(notifier.messages) == message_count_at_finish
+
+
+async def test_debug_logs_sub_stream_comparison_to_console_only(tmp_path, monkeypatch, capsys):
+    # Two files on "main", three on "sub" for the same day/channel -- a
+    # concrete stand-in for the suspected root cause of the clip-count
+    # discrepancy vs. the mobile app (this tool never searches "sub" by
+    # default).
+    recordings = {
+        (0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("m_a", 1), ("m_b", 2)]),
+        (0, "sub"): _recordings(channel=0, stream="sub", names_and_hours=[("s_a", 1), ("s_b", 2), ("s_c", 3)]),
+    }
+    fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls()
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        concurrency=1,
+        debug=True,
+        notifier=notifier,
+    )
+
+    out = capsys.readouterr().out
+    assert "[diag] 2024-01-15 stream comparison: main=2 sub=3" in out
+    # Diagnostic output is console-only -- never sent to Telegram.
+    assert not any("diag" in m for m in notifier.messages)
+    # The sub-stream files were never actually downloaded or added to the
+    # job list -- this is a comparison only, not a behavior change.
+    assert not any("s_a" in n or "s_b" in n or "s_c" in n for _, n in fake_bc_cls.calls)
+
+
+async def test_no_diag_output_without_debug(tmp_path, monkeypatch, capsys):
+    recordings = {
+        (0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("m_a", 1)]),
+        (0, "sub"): _recordings(channel=0, stream="sub", names_and_hours=[("s_a", 1), ("s_b", 2)]),
+    }
+    fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls()
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        concurrency=1,
+    )
+
+    assert "[diag]" not in capsys.readouterr().out
