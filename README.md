@@ -140,16 +140,27 @@ to keep the peak memory overhead as low as it reasonably can be.
 If you've actually hit an out-of-memory crash (the container just dies, no application
 error logged — that's what an OOM kill looks like), set `--max-download-mb`
 (`REOLINK_MAX_DOWNLOAD_MB`) to a ceiling appropriate for your device's available memory.
-A recording that exceeds it is skipped immediately with no retries wasted on it, since
-the same recording would hit the same limit again every time — rather than risking
-another crash downloading it in full. Unset by default (no cap), since it's a hard skip,
-not just a warning: only turn it on if you've actually seen memory pressure, so you don't
+A recording that exceeds it is skipped with no retries wasted on it, since the same
+recording would hit the same limit again every time — rather than risking another crash
+downloading it in full. Unset by default (no cap), since it's a hard skip, not just a
+warning: only turn it on if you've actually seen memory pressure, so you don't
 unexpectedly lose recordings that would have downloaded fine.
 
-Each skipped-for-size file is still logged to the console immediately as it happens, but
-Telegram only gets a single count of them in the final finish message (e.g. "2 skipped
-(too large)") rather than one notification per skipped file — a run with many oversized
-files would otherwise be as noisy as the per-file spam Telegram already avoids elsewhere.
+The camera already reports each recording's approximate size during search
+(`vod_file.size`), so a recording already known to exceed the limit is skipped there —
+before ever opening a download connection for it — rather than discovering that partway
+through actually downloading it. That's a best-effort check (the on-camera size isn't
+byte-identical to what would actually be received), so the same limit is still enforced
+against the real byte count as it downloads, as a safety net for recordings whose
+reported size is missing or under-stated.
+
+Every skipped-for-size file is logged to the console immediately as it happens and
+appended to `<output>/skipped_too_large.log` (timestamp, channel, filename, and reason)
+— a durable record you can check without scrolling back through console output, which
+can scroll away or get rotated out of a long-running container's logs. Telegram only
+gets a single count of them in the final finish message (e.g. "2 skipped (too large)")
+rather than one notification per skipped file — a run with many oversized files would
+otherwise be as noisy as the per-file spam Telegram already avoids elsewhere.
 
 ## Resuming interrupted runs
 

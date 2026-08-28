@@ -417,6 +417,40 @@ async def test_resume_with_nothing_left_to_download(tmp_path, monkeypatch):
     assert any("Found: 1, downloaded: 0, failed: 0, 1 already on disk" in m for m in notifier.messages)
 
 
+async def test_nothing_left_when_everything_is_over_the_size_limit(tmp_path, monkeypatch):
+    # All recordings found are oversized -- the "nothing left to download"
+    # early-exit path must still report the size-skip count, not just
+    # already-on-disk skips.
+    recordings = {
+        (0, "main"): [
+            FakeVodFile("ch0_huge.mp4", datetime(2024, 1, 15, 1, 0), datetime(2024, 1, 15, 1, 5), size=700_000_000),
+        ],
+    }
+    fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls()
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        max_download_mb=100,
+        notifier=notifier,
+    )
+
+    assert fake_bc_cls.calls == []  # never even connected to download anything
+    finish_message = next(m for m in notifier.messages if "finished run" in m)
+    assert "1 skipped (too large)" in finish_message
+    assert (tmp_path / "skipped_too_large.log").exists()
+
+
 async def test_hourly_heartbeat_reports_progress_on_a_timer(tmp_path, monkeypatch):
     monkeypatch.setattr(rd, "PROGRESS_HEARTBEAT_INTERVAL_SECONDS", 0.05)
     recordings = {(0, "main"): _recordings(channel=0, stream="main", names_and_hours=[("a", 1), ("b", 2)])}
@@ -572,3 +606,56 @@ async def test_oversized_recording_is_skipped_without_retries(tmp_path, monkeypa
     assert not any("too large" in m for m in notifier.messages if "finished run" not in m)
     finish_message = next(m for m in notifier.messages if "finished run" in m)
     assert "1 skipped (too large)" in finish_message
+
+    # The reactive (in-flight) skip path logs to the same durable file the
+    # upfront skip path does.
+    log_text = (tmp_path / "skipped_too_large.log").read_text()
+    assert "ch0_huge" in log_text
+
+
+async def test_upfront_size_skip_never_opens_a_download_connection(tmp_path, monkeypatch):
+    # vod_file.size (known from search, before any download) already exceeds
+    # max_download_mb -- this must be skipped without ever calling
+    # bc.download() at all, unlike the reactive skip (which only fires once
+    # actual bytes are already flowing).
+    recordings = {
+        (0, "main"): [
+            FakeVodFile("ch0_a.mp4", datetime(2024, 1, 15, 1, 0), datetime(2024, 1, 15, 1, 5), size=10_000_000),
+            FakeVodFile(
+                "ch0_huge.mp4", datetime(2024, 1, 15, 2, 0), datetime(2024, 1, 15, 2, 5), size=700_000_000
+            ),
+        ],
+    }
+    fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls()
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        concurrency=1,
+        max_download_mb=100,
+        notifier=notifier,
+    )
+
+    # bc.download() was never called for the huge file -- no connection
+    # opened for it at all, unlike a reactive (in-flight) skip.
+    assert fake_bc_cls.calls == [(0, "20240115_010000_wide_ch0_a")]
+
+    finish_message = next(m for m in notifier.messages if "finished run" in m)
+    assert "1 skipped (too large)" in finish_message
+
+    log_path = tmp_path / "skipped_too_large.log"
+    assert log_path.exists()
+    log_text = log_path.read_text()
+    assert "ch0 (Cam0)" in log_text
+    assert "ch0_huge" in log_text
+    assert "700 MB exceeds the 100 MB" in log_text

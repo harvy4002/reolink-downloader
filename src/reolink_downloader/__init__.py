@@ -114,6 +114,25 @@ def _already_downloaded(output_base: Path) -> bool:
     return output_base.with_suffix(".h264").exists() or output_base.with_suffix(".h265").exists()
 
 
+SKIPPED_TOO_LARGE_LOG_NAME = "skipped_too_large.log"
+
+
+def _log_skipped_for_size(output_dir: Path, channel: int, channel_name: str, file_label: str, detail: str) -> None:
+    """Append a line to <output_dir>/skipped_too_large.log recording a
+    recording skipped for exceeding --max-download-mb — console output
+    alone isn't a durable record (it can scroll away or get rotated out of
+    a long-running container's logs), so this is the one place to check
+    for exactly which recordings were skipped and why, across every run."""
+    log_path = output_dir / SKIPPED_TOO_LARGE_LOG_NAME
+    timestamp = datetime.now().isoformat(timespec="seconds")
+    line = f"{timestamp} ch{channel} ({channel_name}) {file_label}: {detail}\n"
+    try:
+        with log_path.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError as e:
+        print(f"  Warning: could not write to {log_path}: {e}", file=sys.stderr)
+
+
 def _format_duration(seconds: float) -> str:
     total_seconds = int(seconds)
     hours, remainder = divmod(total_seconds, 3600)
@@ -357,6 +376,7 @@ async def _download_worker(
     downloaded_count: list[int],
     progress_state: dict,
     skipped_too_large_count: list[int],
+    output_dir: Path,
     max_download_bytes: int | None = None,
 ) -> None:
     """Drain the shared download queue using one persistent Baichuan
@@ -367,11 +387,12 @@ async def _download_worker(
     leaving the remaining jobs for its siblings to pick up.
 
     Files skipped for being too large are logged to the console immediately
-    (same as any other failure) but not reported to Telegram individually —
-    with potentially many oversized files in one run, that would be as noisy
-    as the per-file progress spam Telegram notifications are already
-    designed to avoid elsewhere. Instead they're counted here and summarized
-    once in the final notify_finish message."""
+    (same as any other failure), appended to <output_dir>/skipped_too_large.log
+    for a durable record, but not reported to Telegram individually — with
+    potentially many oversized files in one run, that would be as noisy as
+    the per-file progress spam Telegram notifications are already designed
+    to avoid elsewhere. Instead they're counted here and summarized once in
+    the final notify_finish message."""
     for connect_attempt in range(1, MAX_RETRIES + 2):
         try:
             async with BaichuanDownloader(ip, username, password, debug=debug) as bc:
@@ -394,6 +415,9 @@ async def _download_worker(
                         print(f"  Skipped (too large): {e}", file=sys.stderr)
                         channel_errors[job.channel] = channel_errors.get(job.channel, 0) + 1
                         skipped_too_large_count[0] += 1
+                        _log_skipped_for_size(
+                            output_dir, job.channel, channel_names[job.channel], job.output_base.name, str(e)
+                        )
                     except (BaichuanError, OSError) as e:
                         print(f"  Failed after {MAX_RETRIES + 1} attempts: {e}", file=sys.stderr)
                         channel_errors[job.channel] = channel_errors.get(job.channel, 0) + 1
@@ -603,10 +627,22 @@ async def download_videos(
         # (as either a .h264 or .h265 file — whichever the camera happened to
         # send) is skipped rather than re-downloaded, so re-running after an
         # interruption only fetches what's actually missing.
+        #
+        # --max-download-mb: the camera already told us each recording's
+        # (approximate) size during search (vod_file.size), so a recording
+        # already known to exceed the limit is skipped here — before ever
+        # opening a download connection for it — rather than discovering
+        # that partway through actually downloading it. This is a best-
+        # effort pre-check (the on-camera size isn't byte-identical to what
+        # we'd actually receive); BaichuanDownloader.download() still
+        # enforces the same limit against the real byte count as a safety
+        # net for when the size is unknown or under-reported.
+        max_download_bytes = max_download_mb * 1_000_000 if max_download_mb is not None else None
         created_dirs: set[Path] = set()
         jobs: list[DownloadJob] = []
         channel_totals: dict[int, int] = {}
         already_downloaded = 0
+        skipped_too_large_count = [0]
         for position, (channel, lens_label, vod_file) in enumerate(all_vod_files, 1):
             output_base = _recording_output_path(
                 output_dir, channel, channel_names[channel], lens_label, vod_file, position
@@ -618,6 +654,21 @@ async def download_videos(
             if _already_downloaded(output_base):
                 already_downloaded += 1
                 continue
+
+            if max_download_bytes is not None:
+                try:
+                    reported_size = vod_file.size
+                except Exception:
+                    reported_size = None
+                if reported_size is not None and reported_size > max_download_bytes:
+                    skipped_too_large_count[0] += 1
+                    detail = (
+                        f"reported size {reported_size / 1_000_000:.0f} MB exceeds the "
+                        f"{max_download_mb} MB max-download-size limit (not downloaded at all)"
+                    )
+                    print(f"  Skipping {output_base.name}: {detail}")
+                    _log_skipped_for_size(output_dir, channel, channel_names[channel], output_base.name, detail)
+                    continue
 
             # On dual-lens cameras/channels the lens is selected by channelId
             # (base = wide, base+1 = telephoto); logicChnBitmap stays 255 as
@@ -632,12 +683,15 @@ async def download_videos(
 
         if already_downloaded:
             print(f"Skipping {already_downloaded} recording(s) already on disk (resuming)")
+        if skipped_too_large_count[0]:
+            print(f"Skipping {skipped_too_large_count[0]} recording(s) over the --max-download-mb limit")
 
         if not jobs:
-            print("Nothing left to download — everything found is already on disk")
+            print("Nothing left to download — everything found is already on disk or over the size limit")
             await notifier.notify_finish(
                 ip=ip, total_found=len(all_vod_files), total_downloaded=0, total_failed=0,
                 output_dir=str(output_dir), already_present=already_downloaded,
+                skipped_too_large=skipped_too_large_count[0],
             )
             return
 
@@ -655,7 +709,9 @@ async def download_videos(
         channel_done: dict[int, int] = {}
         channel_errors: dict[int, int] = {}
         downloaded_count = [0]
-        skipped_too_large_count = [0]
+        # Reused from the job-building loop above (not reset here), so
+        # recordings skipped upfront by reported size and any skipped
+        # reactively during download both land in the same final count.
         progress_state = {"last_bucket": -1}
 
         heartbeat_task = asyncio.create_task(
@@ -683,7 +739,8 @@ async def download_videos(
                         downloaded_count,
                         progress_state,
                         skipped_too_large_count,
-                        max_download_mb * 1_000_000 if max_download_mb is not None else None,
+                        output_dir,
+                        max_download_bytes,
                     )
                     for worker_id in range(concurrency)
                 ),
