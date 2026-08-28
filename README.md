@@ -136,17 +136,29 @@ required options — set each one via its flag or its environment variable.
 
 ## Docker
 
-[`docker-compose.yml`](docker-compose.yml) is a ready-to-use Compose file: every setting
-is listed inline under `environment:` with the tool's real defaults and an example value
-in a comment, so you don't need to hunt through a separate file to see what's
-configurable. This is a one-off job, not a long-running service — the container starts,
-downloads everything in the configured date range, and exits.
+[`docker-compose.yml`](docker-compose.yml) uses a pre-built runtime image
+(`ghcr.io/harvy4002/reolink-downloader`) that contains only the Python/git/ffmpeg/uv
+toolchain — **not** the tool's code. Every time the container starts, its entrypoint
+clones the tool fresh from this repo's `main` branch, installs its dependencies, and
+runs it. That means:
+
+- **No `build:` step at all** — Compose just pulls the image. This sidesteps Synology
+  Container Manager's build engine not having `git` installed (see below).
+- **Always the latest code** — push a change to `main` and the very next container run
+  picks it up automatically, with nothing to rebuild or re-copy.
+- The image itself (published by [`.github/workflows/docker-publish.yml`](.github/workflows/docker-publish.yml))
+  only needs rebuilding when the *toolchain* changes, which is rare.
+
+Every setting is listed inline in `docker-compose.yml` under `environment:` with the
+tool's real defaults and an example value in a comment. This is a one-off job, not a
+long-running service — the container starts, downloads everything in the configured
+date range, and exits.
 
 ```
-git clone https://github.com/harvy4002/reolink-downloader.git
-cd reolink-downloader
-docker compose up --build     # first run: builds the image, then downloads
-docker compose up --build     # later runs: edit REOLINK_START_TIME/END_TIME first
+mkdir reolink-downloader && cd reolink-downloader
+curl -O https://raw.githubusercontent.com/harvy4002/reolink-downloader/main/docker-compose.yml
+# edit the environment: values for your camera, then:
+docker compose up
 ```
 
 Real credentials can be typed directly into `docker-compose.yml`, but since that file is
@@ -155,31 +167,31 @@ for the full list of keys) in the same folder instead — Compose substitutes `$
 it automatically, so secrets never need to be committed. `.env` is already covered by
 this repo's `.gitignore`.
 
+To pin to a specific release instead of always tracking `main`, set `REPO_REF` to a tag
+or commit SHA (and `REPO_URL` if you want to point at a fork).
+
 ### Synology Container Manager
 
-Synology's Container Manager builds images with its own local Docker engine, which
-doesn't have `git` installed — pointing `build:` at a remote GitHub URL fails there with
-`unable to find 'git'`, even though the same compose file builds fine on a normal Docker
-install. So the project's actual files need to already be present on the NAS:
-
-1. Download a zip snapshot of the repo (no `git` required) —
-   `https://github.com/harvy4002/reolink-downloader/archive/refs/heads/main.zip` — and
-   extract it via File Station into a shared folder (e.g. `docker/reolink-downloader`).
-   You need the whole extracted folder (`docker-compose.yml`, `Dockerfile`,
-   `pyproject.toml`, `uv.lock`, `README.md`, `src/`), not just the compose file.
+1. Copy just `docker-compose.yml` into a shared folder (e.g. `docker/reolink-downloader`)
+   via File Station — no other project files are needed, since there's nothing to build.
 2. Open **Container Manager → Project → Create**, set "Path" to that folder — Container
    Manager picks up `docker-compose.yml` automatically.
 3. Edit the `environment:` values in `docker-compose.yml` for your camera, or add a
    sibling `.env` file in the same folder for anything you'd rather not leave in a
    tracked file (Compose substitutes `${VAR}` from it automatically).
-4. Build and start the project. Since this is a one-off job, leave the project's
-   auto-restart setting off (the compose file also sets `restart: "no"`).
+4. Start the project (no Build step needed — it only pulls). Since this is a one-off
+   job, leave the project's auto-restart setting off (the compose file also sets
+   `restart: "no"`).
 5. To fetch a new batch, edit `REOLINK_START_TIME`/`REOLINK_END_TIME` (in the compose
-   file or `.env`) and re-run the project's Build/Start actions. If the tool's code has
-   changed, re-download and re-extract the zip first.
+   file or `.env`) and re-run. Any tool code changes on `main` are picked up
+   automatically on every run — nothing to re-download.
 
 Downloaded videos land in the `./downloads` folder next to the compose file
 (bind-mounted into the container), so they survive after the container exits.
+
+> The image itself is public on GHCR, so no registry login is needed on the NAS. If
+> `docker pull` ever fails with an authorization error, the package's visibility may
+> need to be set to public in the repo's GitHub Packages settings.
 
 ## Usage
 

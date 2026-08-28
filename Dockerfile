@@ -1,25 +1,23 @@
 FROM python:3.14-slim
 
-# ffmpeg is optional at runtime but strongly recommended: without it,
-# downloads are written as raw .h264/.h265 elementary streams instead of
-# being remuxed into playable .mp4 files.
+# git: needed at container *startup* (see entrypoint.sh) to clone the latest
+# app code fresh on every run — this is the container's own git, unrelated
+# to whatever build host runs `docker build` (this image never needs git to
+# build; that's what makes it safe to build on hosts that lack git, like
+# Synology's Container Manager).
+# ffmpeg: needed for mp4 remuxing.
+# ca-certificates: needed for the HTTPS git clone.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends git ffmpeg ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Pin uv via the officially published binary image rather than pip-installing
 # it, per Astral's recommended Docker pattern.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-WORKDIR /app
-COPY pyproject.toml uv.lock README.md ./
-COPY src/ ./src/
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-# --frozen: install exactly what's in uv.lock (reproducible builds).
-# --no-dev: skip the pytest/pytest-asyncio dev-only dependency group.
-RUN uv sync --frozen --no-dev --no-editable
-
-ENV PATH="/app/.venv/bin:${PATH}"
 # Without this, Python block-buffers stdout when it isn't a TTY (i.e. always,
 # under Docker), so `docker logs -f` / Synology's log viewer show progress in
 # large delayed chunks instead of as it happens.
@@ -29,4 +27,4 @@ ENV PYTHONUNBUFFERED=1
 ENV REOLINK_OUTPUT=/downloads
 VOLUME ["/downloads"]
 
-ENTRYPOINT ["reolink-downloader"]
+ENTRYPOINT ["/entrypoint.sh"]
