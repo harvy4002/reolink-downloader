@@ -647,25 +647,40 @@ async def download_videos(
         await host.logout()
 
 
-def parse_datetime(date_string: str) -> datetime:
+def parse_datetime(date_string: str, *, end_of_day: bool = False) -> datetime:
     """
     Parse a date string into a datetime object.
     Supports ISO format and common date formats.
+
+    If date_string has no time component, it defaults to midnight
+    (00:00:00) — unless end_of_day is set, in which case it defaults to the
+    last moment of that day (23:59:59) instead. Pass end_of_day=True for
+    --end-time so e.g. '2024-01-02' includes all of January 2nd, rather than
+    a zero-length window at its very first instant.
     """
-    formats = [
+    datetime_formats = [
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",
-        "%Y-%m-%d",
         "%Y/%m/%d %H:%M:%S",
         "%Y/%m/%d %H:%M",
+    ]
+    date_only_formats = [
+        "%Y-%m-%d",
         "%Y/%m/%d",
     ]
 
-    for fmt in formats:
+    for fmt in datetime_formats:
         try:
             return datetime.strptime(date_string, fmt)
         except ValueError:
             continue
+
+    for fmt in date_only_formats:
+        try:
+            parsed = datetime.strptime(date_string, fmt)
+        except ValueError:
+            continue
+        return parsed.replace(hour=23, minute=59, second=59) if end_of_day else parsed
 
     raise ValueError(
         f"Unable to parse date '{date_string}'. "
@@ -786,7 +801,11 @@ def main():
     parser.add_argument(
         "--end-time",
         default=_env("REOLINK_END_TIME"),
-        help="End date/time (e.g., '2024-01-02' or '2024-01-02 14:30:00') (env: REOLINK_END_TIME)",
+        help=(
+            "End date/time (e.g., '2024-01-02' or '2024-01-02 14:30:00'). A date with no "
+            "time defaults to the end of that day (23:59:59), not midnight, so the whole "
+            "day is included. (env: REOLINK_END_TIME)"
+        ),
     )
     parser.add_argument(
         "--output",
@@ -871,7 +890,7 @@ def main():
     # Parse date/time arguments
     try:
         start_time = parse_datetime(args.start_time)
-        end_time = parse_datetime(args.end_time)
+        end_time = parse_datetime(args.end_time, end_of_day=True)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

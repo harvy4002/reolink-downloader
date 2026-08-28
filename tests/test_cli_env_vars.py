@@ -2,6 +2,7 @@
 (Docker-friendly), with an explicit CLI flag always overriding it."""
 
 import sys
+from datetime import datetime
 from unittest.mock import patch
 
 import pytest
@@ -37,6 +38,21 @@ def test_required_options_read_from_env(monkeypatch):
     assert captured["ip"] == "10.0.0.5"
     assert captured["username"] == "admin"
     assert captured["password"] == "secret"
+
+
+def test_date_only_end_time_covers_the_whole_day(monkeypatch):
+    # A bare date for --end-time must include all of that day, not stop at
+    # its first instant (midnight) -- start-time keeps defaulting to
+    # midnight, since a range should *begin* at the start of its first day.
+    captured = _run_main_capturing_download_call(monkeypatch, [], REQUIRED_ENV)
+    assert captured["start_time"] == datetime(2024, 1, 1, 0, 0, 0)
+    assert captured["end_time"] == datetime(2024, 1, 2, 23, 59, 59)
+
+
+def test_explicit_end_time_of_day_is_not_overridden(monkeypatch):
+    env = {**REQUIRED_ENV, "REOLINK_END_TIME": "2024-01-02 08:00:00"}
+    captured = _run_main_capturing_download_call(monkeypatch, [], env)
+    assert captured["end_time"] == datetime(2024, 1, 2, 8, 0, 0)
 
 
 def test_optional_settings_read_from_env(monkeypatch):

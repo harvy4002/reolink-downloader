@@ -302,7 +302,9 @@ options:
                         Start date/time (e.g., '2024-01-01' or '2024-01-01
                         14:30:00') (env: REOLINK_START_TIME)
   --end-time END_TIME   End date/time (e.g., '2024-01-02' or '2024-01-02
-                        14:30:00') (env: REOLINK_END_TIME)
+                        14:30:00'). A date with no time defaults to the end
+                        of that day (23:59:59), not midnight, so the whole
+                        day is included. (env: REOLINK_END_TIME)
   --output OUTPUT       Output directory for downloaded videos (default:
                         ./downloads) (env: REOLINK_OUTPUT)
   --channel CHANNEL     NVR channel(s) to download, e.g. '0', '0,2,5', '0-3',
