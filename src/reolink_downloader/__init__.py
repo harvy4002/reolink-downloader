@@ -114,6 +114,19 @@ def _already_downloaded(output_base: Path) -> bool:
     return output_base.with_suffix(".h264").exists() or output_base.with_suffix(".h265").exists()
 
 
+def _vod_file_size(vod_file: object) -> int | None:
+    """vod_file.size is typed as int by reolink_aio, but the underlying raw
+    API value can actually be a numeric string (reolink_aio's own source has
+    example data like 'size': '113246208') — cast defensively so every
+    caller gets a real int (for size-limit comparisons and arithmetic) or a
+    clean None, rather than crashing with e.g. "'>' not supported between
+    instances of 'str' and 'int'"."""
+    try:
+        return int(vod_file.size)
+    except Exception:
+        return None
+
+
 SKIPPED_TOO_LARGE_LOG_NAME = "skipped_too_large.log"
 
 
@@ -201,10 +214,7 @@ def _make_progress_logger(job: "DownloadJob", worker_id: int):
 async def _attempt_download(
     bc: BaichuanDownloader, job: "DownloadJob", worker_id: int, max_download_bytes: int | None
 ) -> Path:
-    try:
-        total_size = job.vod_file.size
-    except Exception:
-        total_size = None
+    total_size = _vod_file_size(job.vod_file)
     return await bc.download(
         job.output_base,
         start=job.vod_file.start_time,
@@ -656,10 +666,7 @@ async def download_videos(
                 continue
 
             if max_download_bytes is not None:
-                try:
-                    reported_size = vod_file.size
-                except Exception:
-                    reported_size = None
+                reported_size = _vod_file_size(vod_file)
                 if reported_size is not None and reported_size > max_download_bytes:
                     skipped_too_large_count[0] += 1
                     detail = (

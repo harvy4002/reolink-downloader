@@ -659,3 +659,44 @@ async def test_upfront_size_skip_never_opens_a_download_connection(tmp_path, mon
     assert "ch0 (Cam0)" in log_text
     assert "ch0_huge" in log_text
     assert "700 MB exceeds the 100 MB" in log_text
+
+
+async def test_string_vod_file_size_does_not_crash_the_run(tmp_path, monkeypatch):
+    # reolink_aio's VOD_file.size is typed as int but the underlying raw API
+    # value can actually be a numeric string ('size': '113246208' seen in
+    # reolink_aio's own source) -- this must not crash the whole run with
+    # "'>' not supported between instances of 'str' and 'int'".
+    recordings = {
+        (0, "main"): [
+            FakeVodFile(
+                "ch0_huge.mp4", datetime(2024, 1, 15, 1, 0), datetime(2024, 1, 15, 1, 5), size="700000000"
+            ),
+            FakeVodFile("ch0_a.mp4", datetime(2024, 1, 15, 2, 0), datetime(2024, 1, 15, 2, 5), size="10000000"),
+        ],
+    }
+    fake_host_cls = make_fake_host_class(channels=[0], recordings=recordings)
+    fake_bc_cls = make_fake_baichuan_cls()
+    notifier = RecordingNotifier()
+    monkeypatch.setattr(rd, "Host", fake_host_cls)
+    monkeypatch.setattr(rd, "BaichuanDownloader", fake_bc_cls)
+
+    await rd.download_videos(
+        ip="10.0.0.5",
+        username="u",
+        password="p",
+        start_time=datetime(2024, 1, 15, 0, 0),
+        end_time=datetime(2024, 1, 15, 23, 59),
+        output_dir=tmp_path,
+        lenses=["wide"],
+        channel_spec="all",
+        concurrency=1,
+        max_download_mb=100,
+        notifier=notifier,
+    )
+
+    # The run must complete normally: the huge (string-sized) file skipped
+    # upfront, the normal (string-sized) one downloaded successfully.
+    assert not any("aborted" in m for m in notifier.messages)
+    assert fake_bc_cls.calls == [(0, "20240115_020000_wide_ch0_a")]
+    finish_message = next(m for m in notifier.messages if "finished run" in m)
+    assert "1 skipped (too large)" in finish_message
